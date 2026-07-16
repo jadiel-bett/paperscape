@@ -1,0 +1,2 @@
+# Research Map Prompt Template
+# This file will be populated in a later sub-task (Phase 5).

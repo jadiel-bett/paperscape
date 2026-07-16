@@ -1,0 +1,25 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PaperScape — Docker Compose stub
+# Full wiring will be completed in Phase 10 (Docker Compose and E2E Validation).
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    # volumes and health-check to be added in Phase 10
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    # nginx config to be added in Phase 10
