@@ -8,7 +8,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.venv/
+.venv*/
 venv/
 env/
 .pytest_cache/
@@ -52,3 +52,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Project-specific generated paths
+backend/.venv*/
+frontend/build/
+frontend/.dart_tool/
