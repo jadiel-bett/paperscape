@@ -19,7 +19,17 @@ _VALID_FINDING = Finding(
     evidence=[_VALID_EVIDENCE],
     confidence="high",
 )
-_THREE_FINDINGS = [_VALID_FINDING, _VALID_FINDING, _VALID_FINDING]
+_FINDING_B = Finding(
+    statement="Finding two.",
+    evidence=[_VALID_EVIDENCE],
+    confidence="partial",
+)
+_FINDING_C = Finding(
+    statement="Finding three.",
+    evidence=[_VALID_EVIDENCE],
+    confidence="uncertain",
+)
+_THREE_FINDINGS = [_VALID_FINDING, _FINDING_B, _FINDING_C]
 _NOW = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
@@ -54,6 +64,26 @@ def test_chunk_missing_chunk_id_rejected() -> None:
         Chunk(page=1, text="t")  # type: ignore[call-arg]
 
 
+def test_chunk_blank_chunk_id_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Chunk(chunk_id="   ", page=1, text="t")
+
+
+def test_chunk_whitespace_only_text_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Chunk(chunk_id="x", page=1, text="   ")
+
+
+def test_chunk_text_is_stripped() -> None:
+    c = Chunk(chunk_id="x", page=1, text="  hello  ")
+    assert c.text == "hello"
+
+
+def test_chunk_chunk_id_is_stripped() -> None:
+    c = Chunk(chunk_id="  abc-p1-0  ", page=1, text="t")
+    assert c.chunk_id == "abc-p1-0"
+
+
 # ---------------------------------------------------------------------------
 # ExtractionResult
 # ---------------------------------------------------------------------------
@@ -65,9 +95,21 @@ def test_extraction_result_valid() -> None:
     assert len(er.chunks) == 1
 
 
-def test_extraction_result_empty_chunks_accepted() -> None:
-    er = ExtractionResult(paper_id="pid", filename="paper.pdf", chunks=[])
-    assert er.chunks == []
+def test_extraction_result_empty_chunks_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ExtractionResult(paper_id="pid", filename="paper.pdf", chunks=[])
+
+
+def test_extraction_result_blank_paper_id_rejected() -> None:
+    chunk = Chunk(chunk_id="c", page=1, text="t")
+    with pytest.raises(ValidationError):
+        ExtractionResult(paper_id="   ", filename="paper.pdf", chunks=[chunk])
+
+
+def test_extraction_result_blank_filename_rejected() -> None:
+    chunk = Chunk(chunk_id="c", page=1, text="t")
+    with pytest.raises(ValidationError):
+        ExtractionResult(paper_id="pid", filename="  ", chunks=[chunk])
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +156,21 @@ def test_evidence_page_zero_rejected() -> None:
         Evidence(chunk_id="c", page=0, excerpt="text")
 
 
+def test_evidence_blank_excerpt_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Evidence(chunk_id="c", page=1, excerpt="   ")
+
+
+def test_evidence_blank_chunk_id_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Evidence(chunk_id="  ", page=1, excerpt="text")
+
+
+def test_evidence_excerpt_is_stripped() -> None:
+    e = Evidence(chunk_id="c", page=1, excerpt="  hi  ")
+    assert e.excerpt == "hi"
+
+
 # ---------------------------------------------------------------------------
 # Finding
 # ---------------------------------------------------------------------------
@@ -133,6 +190,16 @@ def test_finding_invalid_confidence_rejected() -> None:
 def test_finding_empty_evidence_rejected() -> None:
     with pytest.raises(ValidationError):
         Finding(statement="s", evidence=[], confidence="high")
+
+
+def test_finding_blank_statement_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Finding(statement="   ", evidence=[_VALID_EVIDENCE], confidence="high")
+
+
+def test_finding_statement_is_stripped() -> None:
+    f = Finding(statement="  Finding one.  ", evidence=[_VALID_EVIDENCE], confidence="high")
+    assert f.statement == "Finding one."
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +222,8 @@ def test_research_map_two_findings_rejected() -> None:
         ResearchMap(
             paper_id="p",
             research_question="q",
-            findings=[_VALID_FINDING, _VALID_FINDING],
-            limitations=[],
+            findings=[_VALID_FINDING, _FINDING_B],
+            limitations=["l1"],
         )
 
 
@@ -166,8 +233,28 @@ def test_research_map_four_findings_rejected() -> None:
             paper_id="p",
             research_question="q",
             findings=[_VALID_FINDING] * 4,
+            limitations=["l1"],
+        )
+
+
+def test_research_map_empty_limitations_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ResearchMap(
+            paper_id="p",
+            research_question="q",
+            findings=_THREE_FINDINGS,
             limitations=[],
         )
+
+
+def test_research_map_at_least_one_limitation_accepted() -> None:
+    m = ResearchMap(
+        paper_id="p",
+        research_question="q",
+        findings=_THREE_FINDINGS,
+        limitations=["one limitation"],
+    )
+    assert len(m.limitations) == 1
 
 
 def test_research_map_default_disclaimer() -> None:
@@ -175,20 +262,41 @@ def test_research_map_default_disclaimer() -> None:
         paper_id="p",
         research_question="q",
         findings=_THREE_FINDINGS,
-        limitations=[],
+        limitations=["l1"],
     )
     assert m.disclaimer == "This map does not replace expert review."
 
 
-def test_research_map_custom_disclaimer_accepted() -> None:
-    m = ResearchMap(
-        paper_id="p",
-        research_question="q",
-        findings=_THREE_FINDINGS,
-        limitations=[],
-        disclaimer="Custom note.",
-    )
-    assert m.disclaimer == "Custom note."
+def test_research_map_custom_disclaimer_rejected() -> None:
+    """disclaimer is a fixed Literal — arbitrary text must be rejected."""
+    with pytest.raises(ValidationError):
+        ResearchMap(
+            paper_id="p",
+            research_question="q",
+            findings=_THREE_FINDINGS,
+            limitations=["l1"],
+            disclaimer="Some other text.",  # type: ignore[arg-type]
+        )
+
+
+def test_research_map_blank_paper_id_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ResearchMap(
+            paper_id="   ",
+            research_question="q",
+            findings=_THREE_FINDINGS,
+            limitations=["l1"],
+        )
+
+
+def test_research_map_blank_research_question_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ResearchMap(
+            paper_id="p",
+            research_question="   ",
+            findings=_THREE_FINDINGS,
+            limitations=["l1"],
+        )
 
 
 # ---------------------------------------------------------------------------

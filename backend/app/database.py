@@ -1,22 +1,35 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
+
+_log = logging.getLogger(__name__)
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
     """Open a SQLite connection and configure it for use in PaperScape.
 
-    Sets ``row_factory = sqlite3.Row`` so that column values can be
-    accessed by name.  Enables WAL journal mode for file-based databases;
-    WAL is skipped for ``:memory:`` databases where it has no effect.
+    - Sets ``row_factory = sqlite3.Row`` so column values are accessible by name.
+    - Enables ``PRAGMA foreign_keys = ON`` on every connection.
+    - Enables WAL journal mode for file-backed databases; WAL is intentionally
+      skipped for ``:memory:`` databases where it has no effect.
 
     The caller is responsible for closing the returned connection.
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     if db_path != ":memory:":
-        conn.execute("PRAGMA journal_mode=WAL")
+        result = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        actual_mode = result[0] if result is not None else "unknown"
+        if actual_mode != "wal":
+            _log.warning(
+                "SQLite WAL mode requested but current journal_mode is %r "
+                "(db_path=%r). Write concurrency may be reduced.",
+                actual_mode,
+                db_path,
+            )
     return conn
 
 
@@ -29,28 +42,39 @@ def init_db(
     Creates the ``jobs``, ``extractions``, and ``research_maps`` tables
     (idempotent — uses ``CREATE TABLE IF NOT EXISTS``).
 
-    Any jobs that were left in ``running`` state by a previous process
-    crash are reset to ``failed`` so the system never serves stale state.
+    Any jobs that were left in ``running`` state by a previous process crash
+    are reset to ``failed`` with ``error = 'server_restart'`` so the system
+    never serves stale in-progress state.
+
+    Transaction behaviour
+    ---------------------
+    All DDL and the stale-reset DML run inside a single explicit transaction
+    that is committed on success or rolled back on any exception before the
+    exception is re-raised.  SQLite supports transactional DDL so both schema
+    changes and the stale-reset update are atomic.
 
     Connection ownership
     --------------------
-    - If *conn* is ``None``, a new connection is opened internally and
-      closed before this function returns.
-    - If a *conn* is supplied by the caller it is used as-is and is
-      **never closed** here — ownership stays with the caller.  This
-      supports test fixtures that share a single ``:memory:`` connection.
+    - If *conn* is ``None``, a new connection is opened internally and closed
+      (after commit or rollback) before this function returns.
+    - If a *conn* is supplied by the caller it is used as-is and is **never
+      closed** here — ownership stays with the caller.  This supports test
+      fixtures that share a single ``:memory:`` connection.
     """
     _owns_conn = conn is None
     if _owns_conn:
         conn = get_connection(db_path)
 
     try:
+        conn.execute("BEGIN")
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id     TEXT NOT NULL PRIMARY KEY,
                 paper_id   TEXT NOT NULL,
-                status     TEXT NOT NULL,
+                status     TEXT NOT NULL
+                           CHECK (status IN ('pending', 'running', 'succeeded', 'failed')),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 error      TEXT
@@ -85,14 +109,18 @@ def init_db(
             """
             UPDATE jobs
                SET status     = 'failed',
-                   error      = 'Reset by server restart',
+                   error      = 'server_restart',
                    updated_at = ?
              WHERE status = 'running'
             """,
             (datetime.now(timezone.utc).isoformat(),),
         )
 
-        conn.commit()
+        conn.execute("COMMIT")
+        _log.info("Database initialised at %r.", db_path)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
     finally:
         if _owns_conn:
             conn.close()

@@ -6,11 +6,15 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
-class JobStatus(str, enum.Enum):
+class JobStatus(enum.StrEnum):
     """Valid states for a background processing job.
 
     Transitions: pending → running → succeeded
                                    ↘ failed
+
+    Implemented as ``enum.StrEnum`` (Python 3.11+) so that values compare
+    equal to plain strings and serialise to bare strings in JSON without a
+    custom encoder.
     """
 
     PENDING = "pending"

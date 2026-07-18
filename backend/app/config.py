@@ -10,15 +10,20 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables.
 
     Intended for use with FastAPI's ``Depends(get_settings)``.  Direct
-    instantiation (``Settings(...)``) is supported for tests that need to
-    supply overrides without touching the environment or the module-level
-    cache.
+    instantiation is supported for tests — pass ``_env_file=None`` to
+    prevent pydantic-settings from reading any ``.env`` file:
+
+        Settings(_env_file=None, database_url="sqlite:///:memory:", ...)
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # watsonx.ai credentials
-    # watsonx_api_key is a secret — repr shows "**********"
+    # watsonx_api_key is a secret — repr and JSON serialisation show "**********"
     watsonx_api_key: SecretStr = SecretStr("")
     watsonx_url: str = "https://us-south.ml.cloud.ibm.com"
     # watsonx_project_id is a non-secret identifier — kept as plain str
@@ -40,7 +45,8 @@ class Settings(BaseSettings):
         """Accept only SQLite URLs in the two supported forms:
 
         - ``sqlite:///:memory:``
-        - ``sqlite:///`` followed by a non-empty path
+        - ``sqlite:///`` followed by a non-empty path (relative or absolute,
+          including Windows-style paths such as ``sqlite:///C:/data/app.db``)
         """
         if v == "sqlite:///:memory:":
             return v
@@ -62,8 +68,14 @@ class Settings(BaseSettings):
     def db_path(self) -> str:
         """Return the plain filesystem path (or ':memory:') from database_url.
 
-        Raises ``ValueError`` for malformed URLs that somehow bypass the field
-        validator — this branch is unreachable in normal operation.
+        Examples
+        --------
+        ``"sqlite:///:memory:"``            → ``":memory:"``
+        ``"sqlite:///./paperscape.db"``     → ``"./paperscape.db"``
+        ``"sqlite:///C:/data/app.db"``      → ``"C:/data/app.db"``
+
+        Raises ``ValueError`` for malformed URLs that somehow bypass the
+        field validator — this branch is unreachable in normal operation.
         """
         if self.database_url == "sqlite:///:memory:":
             return ":memory:"
@@ -87,8 +99,8 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return the cached application settings instance.
 
-    This function is designed for ``Depends(get_settings)`` in FastAPI
-    routes.  Direct calls should be confined to ``create_app()`` and tests
-    that supply explicit keyword overrides via ``Settings(...)``.
+    Designed for ``Depends(get_settings)`` in FastAPI routes.  Direct calls
+    should be confined to ``create_app()`` and tests that supply explicit
+    overrides via ``Settings(_env_file=None, ...)``.
     """
     return Settings()
