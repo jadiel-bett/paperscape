@@ -715,7 +715,7 @@ Next planned phase:
 
 **Status:** Completed
 **Branch:** `feat/watsonx-provider`
-**Implementation commit:** `<SUBTASK_4_COMMIT_HASH>`
+**Implementation commit:** `<d56333a>`
 
 ### Objective
 
