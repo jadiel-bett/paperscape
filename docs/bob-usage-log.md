@@ -1697,3 +1697,639 @@ The next phase is:
 - Extraction persistence
 - Research-map persistence
 - Background job orchestration
+
+## Sub-task 6 — SQLite JobStore and Artifact Persistence
+
+**Status:** Completed  
+**Branch:** `feat/job-store-persistence`  
+**Implementation commit:** `<f7e499b>`
+
+### Objective
+
+Implement a synchronous SQLite persistence layer for:
+
+- Job lifecycle records
+- Extracted paper content
+- Generated research maps
+
+The persistence layer needed to:
+
+- Use the existing SQLite schema
+- Reconstruct validated Pydantic domain models
+- Support atomic job-state transitions
+- Prevent multiple workers from claiming the same pending job
+- Support caller-managed transactions spanning multiple repositories
+- Preserve extraction and research-map data across application restarts
+- Report corrupt stored records safely
+- Avoid logging paper content, evidence excerpts, prompts, responses, or credentials
+- Remain independent of FastAPI, background tasks, PDF parsing, and watsonx inference
+
+### IBM Bob workflow
+
+#### Planning
+
+**Bob mode:** Plan
+
+Bob reviewed:
+
+- `AGENTS.md`
+- `docs/product-spec.md`
+- `docs/vertical-slice-plan.md`
+- `docs/data-model.md`
+- `backend/app/database.py`
+- `backend/app/config.py`
+- Paper, research-map, and job models
+- Extraction and research-map services
+- Existing database tests
+
+Bob created:
+
+- `docs/subtask-6-job-store-persistence-plan.md`
+
+The plan covered:
+
+- Existing SQLite schema suitability
+- Repository interfaces
+- Shared persistence exceptions
+- Connection ownership
+- Transaction ownership
+- Job lifecycle transitions
+- Atomic compare-and-set SQL
+- Pydantic serialization
+- Corrupt-record handling
+- Repository unit tests
+- Cross-repository transaction tests
+
+### Existing schema assessment
+
+Bob inspected the existing tables:
+
+```text
+jobs
+extractions
+research_maps
+```
+
+The existing schema was determined to be sufficient for the vertical slice.
+
+No database migration or schema redesign was required.
+
+The tables already supported:
+
+- Application-generated job IDs
+- Indexed paper-to-job lookup
+- Job status constraints
+- One extraction per paper
+- One research map per paper
+- Serialized chunk data
+- Serialized research-map data
+- Nullable job failure codes
+
+No ORM or migration framework was added.
+
+### Human review and plan corrections
+
+The developer reviewed the initial plan and required several changes before implementation.
+
+The final approved design required:
+
+1. Strict, non-idempotent job transitions.
+2. A second worker attempting to claim an already-running job to receive `InvalidJobTransitionError`.
+3. Support for `pending → failed` when scheduling or preflight work fails before execution begins.
+4. Storage of safe machine-readable error codes only.
+5. Complete separation between repository-owned and caller-owned transactions.
+6. Injectable connection factories for all repositories.
+7. One clock call during job creation so `created_at` and `updated_at` begin with the same value.
+8. UTC-aware job timestamps.
+9. Storage of only `list[Chunk]` in `extractions.chunks_json`.
+10. Verification that a decoded research map's `paper_id` matches its database row.
+11. Validation of all job IDs, paper IDs, generated IDs, and failure codes.
+12. Deterministic active-job ordering.
+13. Deterministic compare-and-set tests rather than timing-dependent threaded races.
+14. Cross-repository transaction tests using one caller-owned SQLite connection.
+
+Bob revised the plan before implementation.
+
+### Implementation
+
+**Bob mode:** Agent
+
+Bob created:
+
+- `backend/app/repositories/__init__.py`
+- `backend/app/repositories/errors.py`
+- `backend/app/repositories/job_store.py`
+- `backend/app/repositories/extraction_store.py`
+- `backend/app/repositories/research_map_store.py`
+- `backend/tests/unit/test_job_store.py`
+- `backend/tests/unit/test_extraction_store.py`
+- `backend/tests/unit/test_research_map_store.py`
+- `backend/tests/unit/test_repository_integration.py`
+
+Bob modified:
+
+- `backend/app/models/job.py`
+- `docs/data-model.md`
+- `docs/subtask-6-job-store-persistence-plan.md`
+
+### Persistence exception hierarchy
+
+The implementation introduced:
+
+```text
+PersistenceError
+├── RecordNotFoundError
+├── InvalidJobTransitionError
+└── CorruptRecordError
+```
+
+The exceptions distinguish:
+
+- General SQLite storage failures
+- Missing records
+- Invalid job-state transitions
+- Stored records that cannot be reconstructed safely
+
+Original SQLite, parsing, or Pydantic exceptions are preserved through exception chaining where appropriate.
+
+Public exception messages do not include:
+
+- Extracted paper text
+- Evidence excerpts
+- Stored JSON payloads
+- Prompts
+- Model responses
+- Credentials
+- Database connection strings
+
+### JobStore
+
+`JobStore` supports:
+
+- Creating pending jobs
+- Retrieving jobs
+- Requiring existing jobs
+- Finding the latest active job for a paper
+- Checking whether a succeeded job exists
+- Marking jobs as running
+- Marking jobs as succeeded
+- Marking jobs as failed
+
+The job state machine is:
+
+```text
+pending ───────────────▶ running ───────────────▶ succeeded
+   │                       │
+   └───────────────────────┴────────────────────▶ failed
+```
+
+Allowed transitions:
+
+```text
+pending → running
+pending → failed
+running → succeeded
+running → failed
+```
+
+Rejected transitions include:
+
+```text
+pending → succeeded
+running → running
+succeeded → succeeded
+failed → failed
+succeeded → failed
+failed → succeeded
+all other transitions from terminal states
+```
+
+Transitions are strict and non-idempotent.
+
+### Atomic job claiming
+
+Job transitions use compare-and-set SQL.
+
+Example:
+
+```sql
+UPDATE jobs
+SET status = ?, updated_at = ?
+WHERE job_id = ?
+  AND status = ?
+```
+
+The affected row count is inspected.
+
+When no row is updated:
+
+1. The repository performs a safe lookup using the same connection.
+2. A missing row produces `RecordNotFoundError`.
+3. An existing row in the wrong state produces `InvalidJobTransitionError`.
+
+An already-running job is never reported as successfully claimed by a second worker.
+
+This prevents two workers from both believing that they own the same job.
+
+### Safe failure codes
+
+The `jobs.error` column stores only a validated machine-readable error code.
+
+Accepted values follow a bounded pattern equivalent to:
+
+```text
+^[a-z][a-z0-9_]{0,63}$
+```
+
+Example codes include:
+
+```text
+server_restart
+task_scheduling_failed
+extraction_missing
+map_generation_failed
+llm_provider_error
+persistence_error
+```
+
+The persistence layer does not store raw exception messages, provider responses, paper content, or prompts.
+
+### UTC timestamp validation
+
+The `Job` model was updated to require timezone-aware UTC timestamps.
+
+The implementation rejects:
+
+- Naive timestamps
+- Non-UTC timestamps
+- Malformed stored timestamp values
+
+Job creation calls the injected clock once:
+
+```python
+now = clock()
+created_at = now
+updated_at = now
+```
+
+Each transition calls the clock once for its updated timestamp.
+
+Tests use fixed clocks and do not depend on wall-clock timing.
+
+### Corrupt job-row handling
+
+Stored job rows are reconstructed through a protected conversion path.
+
+The repository catches stored-data failures such as:
+
+- Invalid job status values
+- Invalid ISO-8601 timestamps
+- Naive stored timestamps
+- Non-UTC stored timestamps
+- Pydantic validation failures
+- Unexpected stored value types
+
+These failures are converted into:
+
+```text
+CorruptRecordError
+```
+
+The original exception is preserved as `__cause__`.
+
+Public errors identify only the affected job ID and do not expose the corrupt stored values.
+
+### ExtractionStore
+
+`ExtractionStore` supports:
+
+- Saving or replacing an extraction
+- Retrieving an extraction
+- Requiring an existing extraction
+- Checking whether an extraction exists
+
+The table stores:
+
+```text
+paper_id
+filename
+chunks_json
+```
+
+Only the validated `list[Chunk]` is serialized into `chunks_json`.
+
+The repository reconstructs an `ExtractionResult` using:
+
+- `paper_id` from the database row
+- `filename` from the database row
+- Validated chunks decoded from `chunks_json`
+
+This avoids duplicating the full `ExtractionResult` inside the JSON column.
+
+Upserts use:
+
+```sql
+INSERT ... ON CONFLICT(paper_id) DO UPDATE
+```
+
+Repeated saves atomically replace the previous filename and chunk list.
+
+### ResearchMapStore
+
+`ResearchMapStore` supports:
+
+- Saving or replacing a research map
+- Retrieving a research map
+- Requiring an existing map
+- Checking whether a map exists
+
+The complete validated `ResearchMap` is serialized into `map_json`.
+
+When reading a map, the repository verifies:
+
+```text
+decoded ResearchMap.paper_id == database row paper_id
+```
+
+A mismatch raises `CorruptRecordError`.
+
+All findings, evidence records, confidence values, limitations, and the fixed disclaimer survive round-trip persistence.
+
+### Serialization
+
+The repositories use Pydantic v2 serialization and validation.
+
+Extraction chunks use a safe typed adapter for:
+
+```text
+list[Chunk]
+```
+
+Research maps use:
+
+```python
+research_map.model_dump_json()
+ResearchMap.model_validate_json(...)
+```
+
+The implementation does not use:
+
+- `pickle`
+- `eval()`
+- Unsafe object decoding
+- Raw JSON string equality as a correctness check
+
+Malformed or schema-invalid stored JSON raises `CorruptRecordError`.
+
+### Connection ownership
+
+All three repositories support:
+
+- Repository-owned connections
+- Caller-supplied connections
+
+For repository-owned connections, the repository:
+
+1. Opens the connection
+2. Begins the transaction
+3. Executes the operation
+4. Commits on success
+5. Rolls back on failure
+6. Closes the connection
+
+For caller-supplied connections, the repository does not:
+
+- Begin a transaction
+- Commit
+- Roll back
+- Close the connection
+
+The caller owns the complete transaction lifecycle.
+
+All repositories accept an injectable connection factory for testability.
+
+### Cross-repository transactions
+
+The implementation supports one caller-owned SQLite transaction spanning:
+
+- `JobStore`
+- `ExtractionStore`
+- `ResearchMapStore`
+
+Tests verify:
+
+- A successful caller-managed commit persists all records
+- A caller-managed rollback removes all records
+- A repository error does not automatically roll back the caller's transaction
+- A shared caller-owned connection remains open across all repositories
+- Job, extraction, and research-map records survive closing and reopening the database
+- Failed jobs and safe failure codes survive reopening
+
+No transaction is kept open during PDF extraction or model inference.
+
+### Logging and privacy
+
+Repositories may log safe metadata such as:
+
+- Operation name
+- Job ID
+- Paper ID
+- Status transition
+- Row count
+- Failure category
+
+Repositories do not log:
+
+- Chunk text
+- Evidence excerpts
+- Extraction JSON
+- Research-map JSON
+- Prompts
+- Model responses
+- Credentials
+- Database connection strings
+- Raw exceptions that may contain sensitive content
+
+### Initial audit
+
+**Bob mode:** Ask
+
+Bob audited:
+
+- Repository boundaries
+- Job transition safety
+- Compare-and-set behavior
+- Timestamp validation
+- Error-code storage
+- Connection ownership
+- Transaction ownership
+- Pydantic serialization
+- Corrupt-data behavior
+- Test isolation
+- Cross-repository integration
+- Logging safety
+- Scope compliance
+
+The initial audit identified two critical issues:
+
+1. Cross-repository transaction tests had not been implemented.
+2. Corrupt stored job timestamps or statuses could escape as raw `ValueError` or Pydantic errors rather than `CorruptRecordError`.
+
+The audit also identified:
+
+- Misleading blank-ID test names
+- Missing explicit rollback-on-write-failure tests for extraction and research-map upserts
+- Weak connection-closure assertions
+- A weak repository-owned commit test
+
+The implementation was not approved for commit until the critical findings were corrected.
+
+### Audit corrections
+
+**Bob mode:** Agent
+
+Bob applied targeted corrections that:
+
+- Added `backend/tests/unit/test_repository_integration.py`
+- Added caller-managed commit tests
+- Added caller-managed rollback tests
+- Added reopen persistence tests
+- Added shared-connection lifecycle tests
+- Added repository-error-without-caller-rollback tests
+- Wrapped corrupt job reconstruction failures as `CorruptRecordError`
+- Added malformed timestamp tests
+- Added naive timestamp tests
+- Added non-UTC timestamp tests
+- Added invalid stored-status tests
+- Verified original exceptions are preserved as `__cause__`
+- Renamed misleading blank-ID tests
+- Added forced SQLite write-failure rollback tests
+- Strengthened repository-owned commit verification
+- Strengthened connection-closure tests using injected factories where practical
+
+### Verification
+
+The developer independently ran:
+
+```powershell
+python -m pip check
+python -m pytest backend/tests --collect-only -q
+python -m pytest backend/tests -v
+git diff --check
+```
+
+Final verified results:
+
+```text
+Backend tests collected: 330
+Backend tests passed: 330
+Failures: 0
+Errors: 0
+Warnings: 5
+pip check: PASS
+git diff --check: PASS
+```
+
+Before the audit corrections, the verified suite contained:
+
+```text
+314 tests collected
+314 tests passed
+5 third-party warnings
+```
+
+The audit corrections added additional corruption, rollback, and cross-repository integration tests. The final post-correction total must be taken directly from pytest collection.
+
+The warnings were third-party PyMuPDF/SWIG deprecation warnings and did not originate from PaperScape code.
+
+### Scope confirmation
+
+The implementation did not add:
+
+- FastAPI routes
+- Upload endpoints
+- Background tasks
+- Worker functions
+- Job polling endpoints
+- Automatic extraction execution
+- Automatic research-map generation
+- Live watsonx calls
+- Flutter integration
+- Celery
+- Redis
+- Alembic
+- Authentication
+- Multi-user ownership
+- Job cancellation
+- Progress percentages
+- File storage
+- Streaming
+
+### Bob contribution
+
+IBM Bob was used to:
+
+- Inspect the existing SQLite schema
+- Create the repository implementation plan
+- Revise the state machine and transaction design
+- Implement the persistence exception hierarchy
+- Implement `JobStore`
+- Implement `ExtractionStore`
+- Implement `ResearchMapStore`
+- Implement strict compare-and-set transitions
+- Add UTC timestamp validation
+- Add Pydantic serialization and reconstruction
+- Generate repository unit tests
+- Audit the implementation
+- Identify missing transaction and corruption tests
+- Apply targeted audit corrections
+- Update persistence documentation
+- Report verification results
+
+### Human contribution
+
+The developer:
+
+- Defined the persistence-layer scope
+- Reviewed Bob's initial plan
+- Required strict non-idempotent job transitions
+- Required `pending → failed`
+- Required safe failure codes only
+- Required caller-owned transaction semantics
+- Required connection-factory injection
+- Required UTC timestamp enforcement
+- Required schema-aligned extraction serialization
+- Required research-map paper-ID integrity checks
+- Required deterministic job-claim tests
+- Reviewed the initial implementation report
+- Identified the test-count discrepancy
+- Requested the Ask-mode audit
+- Required all critical audit findings to be corrected
+- Independently ran dependency checks and the full test suite
+- Approved the final implementation
+
+### Outcome
+
+PaperScape gained a safe and testable SQLite persistence layer.
+
+The completed repositories provide:
+
+- Durable job lifecycle records
+- Atomic job claims and transitions
+- Prevention of duplicate worker claims
+- Safe machine-readable failure codes
+- Extraction round-trip persistence
+- Research-map round-trip persistence
+- Corrupt-record detection
+- Explicit connection ownership
+- Explicit transaction ownership
+- Cross-repository caller-managed transactions
+- Complete offline testing with temporary databases
+
+The persistence layer is ready to support:
+
+- Background job orchestration
+- PDF upload endpoints
+- Research-map job creation
+- Job-status polling
+- Research-map retrieval
