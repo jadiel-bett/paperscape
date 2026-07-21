@@ -191,3 +191,111 @@ ExtractionResult 1 ──── * Chunk
                            │
                            └── 1..* Evidence  (chunk_id → Chunk)
 ```
+
+---
+
+## Persistence Layer (Repositories)
+
+The persistence layer lives in `backend/app/repositories/`. Each store manages a
+single SQLite table and provides atomic, testable data access.
+
+### Exception hierarchy
+
+| Exception | Base | Raised when |
+|---|---|---|
+| `PersistenceError` | `RuntimeError` | A storage-layer operation fails (`sqlite3.Error` chained as `__cause__`) |
+| `RecordNotFoundError` | `PersistenceError` | A requested ID has no matching row |
+| `InvalidJobTransitionError` | `PersistenceError` | A job-status transition is not allowed by the state machine |
+| `CorruptRecordError` | `PersistenceError` | Stored JSON cannot be deserialised into the expected Pydantic model |
+
+### Connection ownership
+
+Every public method on all three stores accepts an optional keyword-only
+`conn: sqlite3.Connection | None = None` parameter.
+
+- **Repository-owned** (``conn is None``): the store opens a connection via its
+  injected ``connection_factory``, executes ``BEGIN``, performs the operation,
+  and on success ``COMMIT``. On any exception it ``ROLLBACK``. The connection is
+  **always closed** in a ``finally`` block.
+- **Caller-supplied** (``conn is not None``): the store does **not** open,
+  ``BEGIN``, ``COMMIT``, ``ROLLBACK``, or close the connection. The caller owns
+  the full transaction lifecycle.
+
+### Serialization rules
+
+| Table | Column(s) | Serialization |
+|---|---|---|
+| `extractions` | `paper_id`, `filename` | Stored directly in row columns; **not** duplicated inside JSON |
+| `extractions` | `chunks_json` | ``TypeAdapter(list[Chunk]).dump_json(chunks).decode("utf-8")`` — stores only the chunk list |
+| `research_maps` | `map_json` | ``ResearchMap.model_dump_json()`` — stores the complete object |
+| `research_maps` | `paper_id` | Verified on read: decoded ``ResearchMap.paper_id`` must match the row key; mismatch raises `CorruptRecordError` |
+| `jobs` | `created_at`, `updated_at` | ``datetime.now(timezone.utc).isoformat()`` — validated as UTC-aware by the ``Job`` model |
+| `jobs` | `error` | Stores only a validated machine-readable error code |
+| `jobs` | `status` | ``JobStatus`` enum serialises to bare string via ``StrEnum`` |
+
+### Error code pattern
+
+The ``jobs.error`` column stores only short machine-readable codes matching:
+
+```
+^[a-z][a-z0-9_]{0,63}$
+```
+
+Examples: ``server_restart``, ``extraction_missing``, ``map_generation_failed``,
+``llm_provider_error``, ``persistence_error``, ``task_scheduling_failed``.
+
+Human-readable messages are mapped from codes at the API/router layer, never in
+the repository.
+
+### Job transition state machine (strict)
+
+```
+pending ──▶ running ──▶ succeeded
+   │           │
+   └───────────┴──────▶ failed
+```
+
+Each transition is atomic ``UPDATE ... WHERE status = ?`` (single source) or
+``WHERE status IN ('pending','running')`` (``mark_failed``).  Zero-row updates
+first query the current status: absent rows raise ``RecordNotFoundError``;
+wrong status raises ``InvalidJobTransitionError``.
+
+There is **no idempotent path** — double-claim detection rejects ``running → running``.
+
+---
+
+## Repository interfaces
+
+### `JobStore`
+
+```python
+class JobStore:
+    def create(self, paper_id: str, *, conn=None) -> Job: ...
+    def get(self, job_id: str, *, conn=None) -> Job | None: ...
+    def require(self, job_id: str, *, conn=None) -> Job: ...
+    def mark_running(self, job_id: str, *, conn=None) -> Job: ...
+    def mark_succeeded(self, job_id: str, *, conn=None) -> Job: ...
+    def mark_failed(self, job_id: str, *, error_code: str, conn=None) -> Job: ...
+    def get_active_job_for_paper(self, paper_id: str, *, conn=None) -> Job | None: ...
+    def has_completed_job_for_paper(self, paper_id: str, *, conn=None) -> bool: ...
+```
+
+### `ExtractionStore`
+
+```python
+class ExtractionStore:
+    def save(self, extraction: ExtractionResult, *, conn=None) -> None: ...
+    def get(self, paper_id: str, *, conn=None) -> ExtractionResult | None: ...
+    def require(self, paper_id: str, *, conn=None) -> ExtractionResult: ...
+    def exists(self, paper_id: str, *, conn=None) -> bool: ...
+```
+
+### `ResearchMapStore`
+
+```python
+class ResearchMapStore:
+    def save(self, research_map: ResearchMap, *, conn=None) -> None: ...
+    def get(self, paper_id: str, *, conn=None) -> ResearchMap | None: ...
+    def require(self, paper_id: str, *, conn=None) -> ResearchMap: ...
+    def exists(self, paper_id: str, *, conn=None) -> bool: ...
+```

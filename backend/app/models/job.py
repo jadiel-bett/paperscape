@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class JobStatus(enum.StrEnum):
     """Valid states for a background processing job.
 
     Transitions: pending → running → succeeded
-                                   ↘ failed
+                                    ↘ failed
 
     Implemented as ``enum.StrEnum`` (Python 3.11+) so that values compare
     equal to plain strings and serialise to bare strings in JSON without a
@@ -32,6 +32,21 @@ class Job(BaseModel):
     created_at: datetime
     updated_at: datetime
     error: str | None = None
+
+    @field_validator("created_at", "updated_at", mode="after")
+    @classmethod
+    def _require_utc_aware(cls, v: datetime) -> datetime:
+        """Reject naive or non-UTC timestamps.
+
+        The repository always writes ``datetime.now(timezone.utc)``, so
+        any loaded timestamp that is naive or has a non-zero UTC offset
+        indicates a storage or programming error.
+        """
+        if v.tzinfo is None:
+            raise ValueError("Timestamp must be timezone-aware.")
+        if v.utcoffset() != timedelta():
+            raise ValueError("Timestamp must be UTC.")
+        return v
 
 
 class JobCreateResponse(BaseModel):
