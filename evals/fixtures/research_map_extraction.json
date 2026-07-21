@@ -1,0 +1,54 @@
+{
+  "paper_id": "eval-paper-001",
+  "filename": "evaluation_paper.pdf",
+  "chunks": [
+    {
+      "chunk_id": "eval-paper-001-p1-1",
+      "page": 1,
+      "section": "Abstract",
+      "text": "This study evaluated the yield performance of three drought-resistant maize varieties (V1, V2, and V3) under controlled water-deficit conditions in semi-arid eastern Kenya. Field trials were conducted over two growing seasons (2023 and 2024) at the Kiboko Agricultural Research Station. The primary objective was to determine whether these varieties could maintain grain yields above 2.5 tonnes per hectare under managed drought stress. Results showed that V2 achieved the highest average yield at 3.1 t/ha, followed by V3 at 2.8 t/ha and V1 at 2.3 t/ha. These findings suggest that improved drought tolerance in V2 and V3 may offer a viable pathway for smallholder farmers in drought-prone regions."
+    },
+    {
+      "chunk_id": "eval-paper-001-p1-2",
+      "page": 1,
+      "section": "Introduction",
+      "text": "Maize is a staple crop across sub-Saharan Africa, supporting the livelihoods of millions of smallholder farmers. However, recurrent droughts linked to climate variability have led to significant yield reductions in recent years. Drought-resistant maize varieties have been developed through both conventional breeding and marker-assisted selection. Despite these efforts, adoption rates remain low in many regions due to concerns about yield stability under variable rainfall. Understanding the performance of new varieties under realistic field conditions is essential for building farmer confidence and guiding seed distribution policy."
+    },
+    {
+      "chunk_id": "eval-paper-001-p2-1",
+      "page": 2,
+      "section": "Methods",
+      "text": "The experiment used a randomised complete block design with three replicates per variety. Each plot measured 5 m by 4 m with a plant density of 53,333 plants per hectare. Drought stress was imposed by withholding irrigation at the vegetative stage for 21 consecutive days. Soil moisture content was monitored weekly using a time-domain reflectometry probe. Grain yield was measured at harvest and adjusted to 13% moisture content. Statistical analysis was performed using a mixed-effects model with block as a random effect. Post-hoc comparisons used Tukey's HSD at the 5% significance level."
+    },
+    {
+      "chunk_id": "eval-paper-001-p3-1",
+      "page": 3,
+      "section": "Results",
+      "text": "The analysis of variance revealed a significant effect of variety on grain yield under drought stress (F = 7.84, p = 0.003). V2 produced a mean yield of 3.1 t/ha (SD = 0.42), which was significantly higher than V1 at 2.3 t/ha (p = 0.008). V3 yielded 2.8 t/ha (SD = 0.38) and was not significantly different from V2 (p = 0.21). The coefficient of variation across replicates was 11.2%. These results confirm that varietal differences in drought tolerance are measurable under field conditions and that V2 and V3 outperform the baseline variety V1."
+    },
+    {
+      "chunk_id": "eval-paper-001-p3-2",
+      "page": 3,
+      "section": "Results",
+      "text": "In addition to yield, secondary traits including days to flowering, plant height, and ear placement height were recorded. V2 showed the earliest mean flowering at 68 days after planting, compared to 74 days for V1. Plant height ranged from 210 cm to 245 cm across all varieties, with no significant differences between treatments. These agronomic characteristics may be correlated with drought escape but were not the primary focus of this study. The full trait dataset is available in the supplementary materials."
+    },
+    {
+      "chunk_id": "eval-paper-001-p4-1",
+      "page": 4,
+      "section": "Discussion",
+      "text": "The yield advantage observed in V2 and V3 is consistent with previous reports on drought-tolerant maize genotypes in eastern and southern Africa. However, the magnitude of the difference (0.8 t/ha between V2 and V1) is smaller than the 1.5 t/ha advantage reported by earlier multi-location trials. This discrepancy may be explained by differences in soil type, intensity of water stress, or the genetic background of the comparator varieties. The results should be interpreted with caution given that the study was conducted at a single site over two seasons. Multi-location validation is necessary before drawing broader conclusions about regional adaptability. The current data do not establish causation between specific genetic markers and yield performance."
+    },
+    {
+      "chunk_id": "eval-paper-001-p5-1",
+      "page": 5,
+      "section": "Conclusion",
+      "text": "This study demonstrates that drought-resistant maize varieties V2 and V3 can maintain commercially viable yields under managed water deficit in a semi-arid environment. The findings support continued investment in drought-tolerance breeding programmes. However, the single-site design and limited number of seasons restrict the generalisability of these results. Future work should include multi-location trials across diverse agro-ecological zones and incorporate farmer-managed on-farm validation plots. Long-term soil moisture data and economic cost-benefit analysis would further strengthen the evidence base for variety recommendation."
+    },
+    {
+      "chunk_id": "eval-paper-001-p5-2",
+      "page": 5,
+      "section": "References",
+      "text": "Cairns, J. E., et al. (2013). Adapting maize production to drought in sub-Saharan Africa. Food Security, 5(3), 345-360. Fischer, R. A., & Edmeades, G. O. (2010). Breeding and cereal yield progress. Crop Science, 50, S85-S98. Setimela, P. S., et al. (2017). On-farm yield gains with stress-tolerant maize in eastern and southern Africa. Agronomy Journal, 109(2), 406-417."
+    }
+  ]
+}
