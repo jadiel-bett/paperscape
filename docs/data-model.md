@@ -36,7 +36,7 @@ The complete output of the extraction service for a single PDF.
 
 ### `UploadResponse`
 
-The JSON body returned by `POST /api/v1/papers/upload` on success (`202 Accepted`).
+The JSON body returned by `POST /api/v1/papers` on success (`201 Created`).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -242,7 +242,8 @@ The ``jobs.error`` column stores only short machine-readable codes matching:
 ```
 
 Examples: ``server_restart``, ``extraction_missing``, ``map_generation_failed``,
-``llm_provider_error``, ``persistence_error``, ``task_scheduling_failed``.
+``llm_provider_error``, ``persistence_error``, ``task_scheduling_failed``,
+``unexpected_error``, ``invalid_job_state``.
 
 Human-readable messages are mapped from codes at the API/router layer, never in
 the repository.
@@ -278,6 +279,7 @@ class JobStore:
     def mark_failed(self, job_id: str, *, error_code: str, conn=None) -> Job: ...
     def get_active_job_for_paper(self, paper_id: str, *, conn=None) -> Job | None: ...
     def has_completed_job_for_paper(self, paper_id: str, *, conn=None) -> bool: ...
+    def get_latest_job_for_paper(self, paper_id: str, *, conn=None) -> Job | None: ...
 ```
 
 ### `ExtractionStore`

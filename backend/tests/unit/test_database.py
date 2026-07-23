@@ -88,8 +88,8 @@ def test_foreign_keys_enabled(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_init_db_stale_reset_all_statuses(conn: sqlite3.Connection) -> None:
-    """Only running jobs become failed; pending, succeeded, failed are unchanged."""
+def test_init_db_stale_reset_resets_pending_and_running(conn: sqlite3.Connection) -> None:
+    """Both pending and running jobs are reset to failed on startup."""
     init_db(":memory:", conn)
 
     _insert = (
@@ -123,10 +123,14 @@ def test_init_db_stale_reset_all_statuses(conn: sqlite3.Connection) -> None:
         "updated_at must be refreshed for the reset job"
     )
 
-    # all others unchanged
-    assert pending["status"] == "pending"
-    assert pending["updated_at"] == "2024-01-01T00:00:00"
+    # pending → failed
+    assert pending["status"] == "failed"
+    assert pending["error"] == "server_restart"
+    assert pending["updated_at"] != "2024-01-01T00:00:00", (
+        "updated_at must be refreshed for the reset job"
+    )
 
+    # terminal states unchanged
     assert succeeded["status"] == "succeeded"
     assert succeeded["updated_at"] == "2024-01-01T00:00:00"
 

@@ -368,6 +368,42 @@ class JobStore:
             if _owns:
                 conn.close()
 
+    def get_latest_job_for_paper(
+        self,
+        paper_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> Job | None:
+        """Return the latest job for *paper_id*, regardless of status.
+
+        Uses deterministic ordering ``ORDER BY created_at DESC, job_id DESC``
+        with ``LIMIT 1``.
+
+        Returns ``None`` when no job exists for *paper_id*.
+        """
+        paper_id = _validate_nonblank(paper_id, "paper_id")
+
+        _owns = conn is None
+        if _owns:
+            conn = self._connection_factory(self._db_path)
+
+        try:
+            row = conn.execute(
+                """SELECT * FROM jobs
+                   WHERE paper_id = ?
+                   ORDER BY created_at DESC, job_id DESC
+                   LIMIT 1""",
+                (paper_id,),
+            ).fetchone()
+            return _row_to_job(row) if row is not None else None
+        except sqlite3.Error as exc:
+            raise PersistenceError(
+                f"Failed to get latest job for paper_id={paper_id!r}."
+            ) from exc
+        finally:
+            if _owns:
+                conn.close()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
