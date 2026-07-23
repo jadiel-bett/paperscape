@@ -37,14 +37,15 @@ def init_db(
     db_path: str,
     conn: sqlite3.Connection | None = None,
 ) -> None:
-    """Initialise the database schema and reset any stale running jobs.
+    """Initialise the database schema and reset any stale jobs.
 
     Creates the ``jobs``, ``extractions``, and ``research_maps`` tables
     (idempotent — uses ``CREATE TABLE IF NOT EXISTS``).
 
-    Any jobs that were left in ``running`` state by a previous process crash
-    are reset to ``failed`` with ``error = 'server_restart'`` so the system
-    never serves stale in-progress state.
+    FastAPI ``BackgroundTasks`` are in-process and not durable.  Any jobs
+    that were left in ``pending`` or ``running`` state by a previous process
+    crash are reset to ``failed`` with ``error = 'server_restart'`` so the
+    system never serves stale in-progress state.
 
     Transaction behaviour
     ---------------------
@@ -104,14 +105,16 @@ def init_db(
             """
         )
 
-        # Reset jobs that were running when the previous process died.
+        # Reset jobs that were pending or running when the previous process
+        # died.  BackgroundTasks are not durable, so pending jobs cannot
+        # safely survive an application restart.
         conn.execute(
             """
             UPDATE jobs
                SET status     = 'failed',
-                   error      = 'server_restart',
-                   updated_at = ?
-             WHERE status = 'running'
+                    error      = 'server_restart',
+                    updated_at = ?
+             WHERE status IN ('pending', 'running')
             """,
             (datetime.now(timezone.utc).isoformat(),),
         )

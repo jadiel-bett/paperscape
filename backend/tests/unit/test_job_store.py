@@ -711,3 +711,51 @@ def test_blank_job_id_rejected(store: JobStore) -> None:
 def test_get_active_with_blank_paper_id(store: JobStore) -> None:
     with pytest.raises(ValueError):
         store.get_active_job_for_paper("  ")
+
+
+# ---------------------------------------------------------------------------
+# get_latest_job_for_paper
+# ---------------------------------------------------------------------------
+
+
+def test_get_latest_no_jobs(store: JobStore) -> None:
+    assert store.get_latest_job_for_paper("p-1") is None
+
+
+def test_get_latest_single_job(store: JobStore) -> None:
+    job = store.create("p-1")
+    latest = store.get_latest_job_for_paper("p-1")
+    assert latest is not None
+    assert latest.job_id == job.job_id
+
+
+def test_get_latest_multiple_jobs(store: JobStore) -> None:
+    first = store.create("p-1")
+    second = store.create("p-1")
+    latest = store.get_latest_job_for_paper("p-1")
+    assert latest is not None
+    assert latest.job_id == second.job_id
+    assert latest.status == second.status
+
+
+def test_get_latest_after_status_change(store: JobStore, tmp_path: Path) -> None:
+    job = store.create("p-1")
+    store.mark_running(job.job_id)
+    store.mark_succeeded(job.job_id)
+    latest = store.get_latest_job_for_paper("p-1")
+    assert latest is not None
+    assert latest.status.value == "succeeded"
+
+
+def test_get_latest_different_papers(store: JobStore) -> None:
+    j1 = store.create("p-1")
+    j2 = store.create("p-2")
+    latest_p1 = store.get_latest_job_for_paper("p-1")
+    latest_p2 = store.get_latest_job_for_paper("p-2")
+    assert latest_p1 is not None and latest_p1.job_id == j1.job_id
+    assert latest_p2 is not None and latest_p2.job_id == j2.job_id
+
+
+def test_get_latest_blank_paper_id(store: JobStore) -> None:
+    with pytest.raises(ValueError):
+        store.get_latest_job_for_paper("  ")

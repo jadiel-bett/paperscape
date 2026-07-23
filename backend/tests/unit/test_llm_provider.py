@@ -192,6 +192,12 @@ def test_validate_false_passed_to_real_factory() -> None:
     We verify this by inspecting the real factory's build() call via a mock
     ModelInference constructor — no live SDK connection is made.
     """
+    import inspect
+
+    from ibm_watsonx_ai.foundation_models import ModelInference
+
+    assert "validate" in inspect.signature(ModelInference).parameters
+
     mock_mi_cls = MagicMock(return_value=MagicMock())
     real_factory = _SdkClientFactory()
 
