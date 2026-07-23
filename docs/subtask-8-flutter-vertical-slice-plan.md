@@ -422,6 +422,23 @@ No `dio` should be added if `http` is used. No router package should be added
 for a single-screen vertical slice. No Riverpod, Bloc, Freezed, Retrofit, or
 code generation should be added unless later requirements justify them.
 
+Implementation must select versions of `http` and `file_picker` that support:
+
+- Dart `>=3.5.4 <4.0.0`
+- Flutter Web
+- the repository's Flutter `3.24.5` environment
+
+Do not put speculative package versions in implementation work unless they are
+verified against the installed SDK and package solver. Dependency compatibility
+must be verified with:
+
+```powershell
+flutter pub get
+flutter analyze
+flutter test
+flutter build web
+```
+
 ### 6.2 HTTP caveat
 
 Reliable upload progress and cancellation are limited with `http`. The UI should
@@ -429,6 +446,11 @@ show indeterminate upload/progress states instead of fake percentages. If
 cancellation cannot be implemented cleanly with the chosen package, stale
 workflow tokens must still prevent old async responses from overwriting newer
 state.
+
+Wrap `http.MultipartRequest` construction behind the API-client boundary so
+multipart field name, exact bytes, filename, and media type can be inspected in
+unit tests without exposing multipart construction details to widgets or the
+workflow controller.
 
 ---
 
@@ -472,6 +494,12 @@ Tests should mirror the feature structure under `frontend/test/`.
 
 This structure keeps API/data concerns, file selection, workflow state, and
 widgets separate without introducing unnecessary framework abstractions.
+
+Browser-specific APIs must remain isolated. Do not import `dart:html` directly
+from widgets, controllers, API models, or DTOs. File selection must remain behind
+`PdfPicker`. If browser-specific behavior is later required, implement it in a
+small adapter with conditional imports so normal Flutter analysis does not depend
+on direct browser APIs.
 
 ---
 
@@ -652,6 +680,17 @@ class SelectedPdf {
 
 `FilePickerPdfPicker` should wrap `file_picker` and return `null` when the user
 cancels selection.
+
+Implementation must configure the picker for exactly one PDF:
+
+- `allowMultiple: false`
+- PDF-only extension/type filtering
+- `withData: true` or the equivalent option required to return bytes on Flutter
+  Web
+- cancellation returns `null` without producing an error
+- exactly one selected file is accepted
+- the picker plugin remains behind the `PdfPicker` abstraction
+- widgets and the controller must not call `FilePicker` directly
 
 ### 12.2 UI-boundary validation
 
@@ -883,7 +922,10 @@ Use Material 3 defaults and a small PaperScape palette derived from a local
 - Text alternatives for nondecorative icons.
 - Error messages visually and semantically associated with relevant controls.
 - No meaning conveyed by color alone.
-- Selectable evidence text where practical.
+- Evidence excerpts must use `SelectableText` or an equivalent selectable-text
+  widget.
+- Evidence text must wrap safely without horizontal overflow.
+- Evidence must remain visibly associated with its finding and page provenance.
 - Practical minimum tap targets.
 - Drag-and-drop must never be the only upload mechanism.
 
@@ -900,6 +942,7 @@ make it a single startup check or manual retry only:
 - do not poll health continuously
 - do not expose backend internals
 - keep health separate from job polling
+- test backend-unavailable and manual-retry behavior with a fake API client
 
 ---
 
@@ -1017,6 +1060,7 @@ Cover at minimum:
 - Finding statements render.
 - Confidence labels render.
 - Evidence excerpts render.
+- Evidence excerpts are rendered as selectable text.
 - Page provenance renders.
 - Chunk identifiers render as secondary metadata.
 - Limitations render.
@@ -1176,6 +1220,7 @@ Do not implement in Sub-task 8:
 - server-sent events
 - push notifications
 - offline job processing
+- backend redesign
 - backend changes unrelated to a verified frontend blocker
 - deployment infrastructure
 
@@ -1213,7 +1258,9 @@ Do not implement in Sub-task 8:
 - [ ] The UI renders the research question.
 - [ ] The UI renders exactly three findings.
 - [ ] Confidence labels render for `high`, `partial`, and `uncertain`.
+- [ ] The UI does not invent numerical confidence percentages.
 - [ ] Evidence excerpts and page provenance are visible.
+- [ ] Evidence excerpts are selectable and wrap without horizontal overflow.
 - [ ] Limitations and disclaimer are visible.
 - [ ] No raw backend errors or response bodies are displayed.
 - [ ] No PDF bytes or paper content are logged.
