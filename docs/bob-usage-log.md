@@ -2333,3 +2333,866 @@ The persistence layer is ready to support:
 - Research-map job creation
 - Job-status polling
 - Research-map retrieval
+
+## Sub-task 7 — Background Research-Map Orchestration and Vertical-Slice API
+
+**Status:** Completed after audit corrections  
+**Branch:** `feat/background-jobs-api`  
+**Implementation commit:** `<2dafddc>`
+
+### Objective
+
+Implement the complete PaperScape backend vertical slice:
+
+1. Upload one selectable-text PDF.
+2. Extract page-aware chunks.
+3. Persist the extraction.
+4. Create an asynchronous research-map job.
+5. Run grounded research-map generation through FastAPI background execution.
+6. Persist the generated `ResearchMap`.
+7. Poll the job status.
+8. Retrieve the completed research map.
+
+The implementation needed to integrate the existing:
+
+- `ExtractionService`
+- `LLMProvider`
+- `WatsonxProvider`
+- `ResearchMapService`
+- `JobStore`
+- `ExtractionStore`
+- `ResearchMapStore`
+
+Route handlers were required to orchestrate these components without duplicating extraction, grounding, inference, or persistence logic.
+
+### IBM Bob workflow
+
+#### Planning
+
+**Bob mode:** Plan
+
+Bob reviewed:
+
+- `AGENTS.md`
+- `docs/product-spec.md`
+- `docs/vertical-slice-plan.md`
+- `docs/data-model.md`
+- `docs/bob-usage-log.md`
+- The FastAPI application factory
+- Settings and database initialization
+- Paper, job, and research-map models
+- Extraction, provider, and research-map services
+- SQLite repositories
+- Existing API and unit tests
+- Environment configuration
+
+Bob created:
+
+- `docs/subtask-7-background-jobs-api-plan.md`
+
+The plan covered:
+
+- Endpoint contracts
+- Multipart PDF validation
+- Upload-size enforcement
+- Paper-ID generation
+- Application dependency injection
+- Service-container construction
+- Background job orchestration
+- Job failure-code mapping
+- Duplicate-job behavior
+- Transaction boundaries
+- Partial-failure recovery
+- Startup stale-job recovery
+- API error responses
+- Offline API and runner tests
+
+### Human review and plan corrections
+
+The developer reviewed the first plan and required several architecture and safety corrections before implementation.
+
+The final approved design required:
+
+1. Reading only the uploaded file bytes from `UploadFile`.
+2. Validating `file.content_type`, not the multipart request media type.
+3. Reading at most `upload_max_bytes + 1`.
+4. Closing `UploadFile` on every success and failure path.
+5. Pinning `python-multipart`.
+6. Returning HTTP 503 before job creation when generation capability is unavailable.
+7. Preventing a duplicate runner from failing another runner's active job.
+8. Using the `Job` returned by `mark_running()`.
+9. Requiring the latest job—not any historical job—to be succeeded before serving a research map.
+10. Protecting active-job lookup and creation with an in-process lock.
+11. Resetting both pending and running jobs after process restart.
+12. Supporting injection of a test `ServiceContainer` through `create_app()`.
+13. Using temporary file-backed SQLite databases in tests.
+14. Running synchronous extraction and persistence outside the async event loop.
+15. Marking scheduling failures with `task_scheduling_failed`.
+16. Avoiding unsupported claims about Starlette's multipart spooling behavior.
+17. Keeping the usage-log update separate from the implementation commit.
+
+Bob revised the implementation plan to incorporate these requirements.
+
+### Implementation
+
+**Bob mode:** Agent
+
+Bob created:
+
+- `backend/app/dependencies.py`
+- `backend/app/services/research_map_job_runner.py`
+- `backend/app/routers/papers.py`
+- `backend/app/routers/jobs.py`
+- `backend/tests/unit/test_research_map_job_runner.py`
+- `backend/tests/unit/test_dependencies.py`
+- `backend/tests/api/test_papers.py`
+- `backend/tests/api/test_jobs.py`
+- `docs/subtask-7-background-jobs-api-plan.md`
+
+Bob modified:
+
+- `backend/app/main.py`
+- `backend/app/database.py`
+- `backend/app/repositories/job_store.py`
+- `backend/app/routers/__init__.py`
+- `backend/requirements.txt`
+- `backend/tests/unit/test_database.py`
+- `backend/tests/unit/test_job_store.py`
+- `backend/tests/api/test_health.py`
+- `docs/data-model.md`
+
+The watsonx settings already existed in `Settings`; they were not introduced by this sub-task.
+
+### Endpoint implementation
+
+The following routes were added under `/api/v1`.
+
+#### Upload and extract a paper
+
+```text
+POST /api/v1/papers
+```
+
+Successful response:
+
+```text
+HTTP 201 Created
+```
+
+The endpoint:
+
+1. Validates the uploaded filename.
+2. Validates `UploadFile.content_type`.
+3. Reads at most the configured limit plus one byte.
+4. Rejects empty uploads.
+5. Rejects oversized uploads.
+6. Performs a lightweight PDF-signature check.
+7. Generates and validates an application-owned paper ID.
+8. Passes the exact uploaded bytes to `ExtractionService`.
+9. Persists the resulting `ExtractionResult`.
+10. Returns `UploadResponse`.
+
+Paper IDs are not derived from filenames.
+
+The endpoint uses `run_in_threadpool()` for blocking extraction and persistence work.
+
+PaperScape does not deliberately persist or manage the uploaded PDF as a file. Starlette may internally spool multipart uploads.
+
+#### Create a research-map job
+
+```text
+POST /api/v1/papers/{paper_id}/research-map-jobs
+```
+
+Successful response:
+
+```text
+HTTP 202 Accepted
+```
+
+The endpoint:
+
+1. Validates the paper identifier.
+2. Verifies that a persisted extraction exists.
+3. Verifies that generation capability is configured.
+4. Checks whether a pending or running job already exists.
+5. Returns the existing active job for idempotent retries.
+6. Creates a new pending job when no active job exists.
+7. Registers background execution.
+8. Returns `JobCreateResponse`.
+
+A previous succeeded or failed job does not block explicit regeneration.
+
+When no generation capability is available, the endpoint returns:
+
+```text
+HTTP 503
+generation_unavailable
+```
+
+No pending job is created in this case.
+
+#### Poll a job
+
+```text
+GET /api/v1/jobs/{job_id}
+```
+
+The endpoint returns:
+
+- Pending jobs
+- Running jobs
+- Succeeded jobs
+- Failed jobs with safe machine-readable error codes
+
+Unknown jobs return HTTP 404.
+
+Raw database, SDK, and domain exceptions are not exposed.
+
+#### Retrieve a research map
+
+```text
+GET /api/v1/papers/{paper_id}/research-map
+```
+
+The endpoint returns a persisted `ResearchMap` only when:
+
+1. The latest job for the paper exists.
+2. The latest job status is `succeeded`.
+3. A persisted research map exists.
+
+A map is hidden when the latest job is:
+
+- Pending
+- Running
+- Failed
+
+This prevents an older succeeded job from exposing a map written by a newer failed or incomplete regeneration attempt.
+
+Retrieval performs no model inference.
+
+### Application service container
+
+Bob implemented an explicit `ServiceContainer` attached to `app.state`.
+
+The container provides:
+
+- `Settings`
+- `ExtractionService`
+- `JobStore`
+- `ExtractionStore`
+- `ResearchMapStore`
+- Paper-ID factory
+- In-process job-creation lock
+- Lazy job-runner factory
+
+The application factory accepts an injected container:
+
+```python
+create_app(
+    settings=None,
+    *,
+    container=None,
+)
+```
+
+This enables API tests to construct a deterministic application with:
+
+- Temporary SQLite storage
+- Fake extraction services
+- Fake background runners
+- Fake model providers
+- Deterministic identifiers
+- No network access
+
+The supplied container is attached before lifespan execution.
+
+The lifespan initializes the database but does not replace a test-supplied container.
+
+### Lazy watsonx construction
+
+The initial implementation conditionally constructed `WatsonxProvider` while building the application container.
+
+An Ask-mode audit demonstrated that the installed IBM SDK could attempt IAM authentication during provider construction, even when validation was expected to be disabled.
+
+This caused importing `app.main` from the repository root to attempt a live request to:
+
+```text
+https://iam.cloud.ibm.com
+```
+
+Bob corrected this by making provider and runner construction genuinely lazy.
+
+The final design does not construct `WatsonxProvider` during:
+
+- `app.main` import
+- `create_app()`
+- Lifespan startup
+- Health requests
+- PDF uploads
+- Job polling
+- Research-map retrieval
+
+Provider construction occurs only when a scheduled research-map job begins execution.
+
+Where supported by the IBM SDK, the underlying inference constructor receives:
+
+```python
+validate=False
+```
+
+Lazy construction remains the primary import and network-safety boundary because SDK validation flags alone are not treated as a guarantee that every SDK version avoids authentication behavior.
+
+### Background job orchestration
+
+`ResearchMapJobRunner` is a synchronous orchestration service designed for FastAPI background execution.
+
+Its successful sequence is:
+
+```text
+mark job running
+→ load persisted extraction
+→ generate grounded research map
+→ persist research map
+→ mark job succeeded
+```
+
+The runner uses the `Job` returned by:
+
+```python
+job_store.mark_running(job_id)
+```
+
+It does not perform an unnecessary second job lookup before loading the extraction.
+
+### Safe job claiming
+
+If `mark_running()` raises:
+
+- `RecordNotFoundError`
+- `InvalidJobTransitionError`
+
+the runner logs safe metadata and returns.
+
+It does not call `mark_failed()` after an unsuccessful claim.
+
+This prevents a duplicate runner from changing another runner's legitimate running job to failed.
+
+Only failures occurring after a successful claim may trigger best-effort failure handling.
+
+### Failure-code mapping
+
+The background runner maps failures to safe machine-readable codes.
+
+```text
+extraction_missing
+map_generation_failed
+llm_provider_error
+persistence_error
+unexpected_error
+task_scheduling_failed
+server_restart
+```
+
+The runner never persists:
+
+- Raw exception messages
+- SDK response bodies
+- Credentials
+- Paper content
+- Evidence excerpts
+- Prompt text
+- Model output
+- Stack traces
+
+#### Extraction failure
+
+A missing extraction produces:
+
+```text
+extraction_missing
+```
+
+#### Grounding failure
+
+`MapGenerationError` produces:
+
+```text
+map_generation_failed
+```
+
+#### Provider failure
+
+`LLMProviderError`, including provider-construction or credential failures during actual background execution, produces:
+
+```text
+llm_provider_error
+```
+
+#### Persistence failure
+
+Repository failures produce:
+
+```text
+persistence_error
+```
+
+#### Unexpected failure
+
+Unexpected exceptions produce:
+
+```text
+unexpected_error
+```
+
+### Scheduling failure
+
+If background-task registration fails after a pending job has been created:
+
+1. The endpoint attempts `pending → failed`.
+2. The persisted error code is:
+
+```text
+task_scheduling_failed
+```
+
+3. The endpoint returns a safe HTTP 500 response.
+4. The job is not left indefinitely pending.
+
+### Duplicate-job protection
+
+The endpoint uses an in-process lock around:
+
+```text
+active-job lookup
+→ job creation
+```
+
+The lock is released before:
+
+- Background-task registration
+- Job execution
+- Model generation
+- Any long-running work
+
+Concurrent requests for the same paper within one application process result in:
+
+- One active job
+- One background task
+- Both requests receiving the same active job ID
+
+This lock does not provide protection across multiple application processes. Distributed coordination was intentionally excluded from the hackathon MVP.
+
+### Transaction boundaries
+
+No SQLite transaction remains open during:
+
+- PDF extraction
+- Prompt construction
+- Initial model generation
+- Corrective generation
+- Other watsonx inference
+
+Repository operations use short, independent transactions.
+
+The job-runner sequence is:
+
+```text
+mark_running transaction
+→ extraction read
+→ no database transaction during inference
+→ research-map save transaction
+→ mark_succeeded transaction
+```
+
+### Partial-failure recovery
+
+A possible partial failure is:
+
+```text
+research map saved
+→ mark_succeeded fails
+```
+
+The selected MVP policy is:
+
+1. Leave the persisted map in SQLite.
+2. Attempt to mark the job failed with `persistence_error`.
+3. Hide the map because the latest job is not succeeded.
+4. Allow a later regeneration request to overwrite the hidden map.
+5. Use startup recovery if the job remains running.
+
+This avoids holding a database transaction across model inference.
+
+### Startup recovery
+
+FastAPI `BackgroundTasks` are not durable across application restarts.
+
+The database initialization process therefore converts stale jobs in either state:
+
+```text
+pending
+running
+```
+
+to:
+
+```text
+status = failed
+error = server_restart
+```
+
+Succeeded and failed jobs remain unchanged.
+
+This prevents jobs from remaining permanently pending after a process exits before background execution begins.
+
+### Upload validation
+
+The upload endpoint validates:
+
+- Nonblank filename
+- File-level PDF media type
+- Configured byte limit
+- Empty uploads
+- Lightweight PDF signature
+- Generated paper identifier
+
+Unsupported file media types return:
+
+```text
+HTTP 415
+unsupported_media_type
+```
+
+Oversized uploads return:
+
+```text
+HTTP 413
+upload_too_large
+```
+
+Extraction failures return a curated response rather than raw parser or validation text.
+
+An extraction `ValueError` is mapped to a static application-controlled message such as:
+
+```text
+The uploaded PDF could not be processed.
+```
+
+The response does not contain:
+
+- `str(exc)`
+- Local file paths
+- Filenames
+- File bytes
+- Extracted text
+- Parser internals
+- Library names
+- Credentials
+- Stack traces
+
+`UploadFile.close()` is called through a complete route-level `finally` path, including:
+
+- Success
+- Blank filename
+- Unsupported media type
+- Empty upload
+- Oversized upload
+- Signature rejection
+- Extraction failure
+- Persistence failure
+- Unexpected failure
+
+### API error contract
+
+API errors use a consistent safe structure:
+
+```json
+{
+  "detail": {
+    "code": "snake_case_code",
+    "message": "Application-controlled message"
+  }
+}
+```
+
+Examples include:
+
+```text
+invalid_upload
+unsupported_media_type
+upload_too_large
+extraction_failed
+paper_not_found
+job_not_found
+map_not_found
+generation_unavailable
+task_scheduling_failed
+persistence_error
+internal_error
+```
+
+Raw domain, SQLite, SDK, validation, and parser errors are not included in API responses.
+
+### First implementation audit
+
+**Bob mode:** Ask
+
+Bob audited:
+
+- App-factory construction
+- Dependency injection
+- Provider lifecycle
+- Multipart upload behavior
+- File closure
+- Upload-size enforcement
+- Paper-ID generation
+- Duplicate-job scheduling
+- Scheduling failure
+- Job-runner claim behavior
+- Error-code mapping
+- Transaction boundaries
+- Startup recovery
+- Partial-failure handling
+- Map-retrieval eligibility
+- Test isolation
+- Scope compliance
+
+The initial audit identified a critical problem:
+
+> Importing `app.main` could instantiate `WatsonxProvider` and trigger live IBM IAM authentication when local watsonx credentials were present.
+
+The audit also identified:
+
+- Unsupported uploads returned HTTP 400 instead of 415.
+- `UploadFile` was not closed on validation failures occurring before file reading.
+- Generated paper IDs were not explicitly validated.
+- Scheduling-failure behavior lacked direct tests.
+- Concurrent duplicate-request protection lacked direct tests.
+- Upload and retrieval tests were weaker than the plan.
+- Implementation-report descriptions contained minor inaccuracies.
+
+The implementation was not approved for commit.
+
+### First audit correction pass
+
+**Bob mode:** Agent
+
+Bob applied corrections that:
+
+- Deferred provider construction until background execution.
+- Added import and network-safety regression tests.
+- Changed unsupported file media type responses to HTTP 415.
+- Added complete upload-file closure handling.
+- Validated generated paper IDs.
+- Added scheduling-failure tests.
+- Added concurrent duplicate-request tests.
+- Added task-lock scope tests.
+- Strengthened upload boundary tests.
+- Strengthened exact-byte extraction tests.
+- Strengthened safe persistence-error tests.
+- Strengthened retrieval eligibility tests.
+- Added provenance and no-inference retrieval tests.
+- Corrected implementation-report terminology.
+
+### Second implementation audit
+
+**Bob mode:** Ask
+
+The second audit reported:
+
+- No critical findings.
+- Genuine lazy provider construction was in place.
+- Importing `app.main` no longer created a provider or network request.
+- Upload, scheduling, concurrency, runner claim, retrieval, and startup recovery behavior aligned with the approved architecture.
+
+Two final issues remained:
+
+1. The audit could not initially confirm that the actual IBM SDK constructor received `validate=False`.
+2. Upload handling exposed `str(exc)` for an extraction `ValueError`.
+
+The implementation remained unapproved until these were reconciled.
+
+### Final audit correction pass
+
+**Bob mode:** Agent
+
+Bob traced the complete SDK construction path:
+
+```text
+job_runner_factory
+→ WatsonxProvider
+→ SDK client factory
+→ IBM ModelInference constructor
+```
+
+Bob then either confirmed or added `validate=False` at the actual supported SDK constructor boundary and added a focused regression test.
+
+Bob also replaced raw upload `ValueError` text with a curated static response and added a regression test containing sensitive sentinel values.
+
+The test verified that the following did not appear in responses, headers, or logs:
+
+```text
+C:\private\research\secret-paper.pdf
+API_KEY_SENTINEL
+PAPER_TEXT_SENTINEL
+```
+
+### Verification
+
+The developer and Bob ran verification from the repository root using the backend virtual environment.
+
+Commands:
+
+```powershell
+backend\.venv\Scripts\python.exe -m pip check
+backend\.venv\Scripts\python.exe -m pytest backend\tests --collect-only -q
+backend\.venv\Scripts\python.exe -m pytest backend\tests -q
+git diff --check
+```
+
+Pre-final-correction verified results were:
+
+```text
+420 tests collected
+420 tests passed
+0 failures
+0 errors
+5 warnings
+pip check: PASS
+git diff --check: PASS
+```
+
+Final verified results:
+
+```text
+Backend tests collected: 421
+Backend tests passed: 421
+Failures: 0
+Errors: 0
+Warnings: 5
+pip check: PASS
+git diff --check: PASS
+Import/network safety: PASS
+Upload error sanitization: PASS
+```
+
+The warnings were third-party PyMuPDF/SWIG deprecation warnings involving:
+
+```text
+SwigPyPacked
+SwigPyObject
+swigvarlink
+```
+
+They did not originate from PaperScape code.
+
+### Scope confirmation
+
+The implementation did not add:
+
+- Celery
+- Redis
+- Distributed workers
+- Distributed locks
+- Job cancellation
+- Progress percentages
+- WebSockets
+- Server-sent events
+- Authentication
+- Multi-user ownership
+- Original-PDF storage
+- OCR
+- Multi-paper comparison
+- Audience adaptation
+- Visual abstracts
+- Narration
+- Flutter UI
+- Deployment infrastructure
+- Live watsonx tests in the default suite
+
+### Bob contribution
+
+IBM Bob was used to:
+
+- Inspect the existing FastAPI application structure
+- Create the Sub-task 7 implementation plan
+- Revise multipart and background-task architecture
+- Implement the application service container
+- Implement lazy provider and runner construction
+- Implement paper upload and extraction endpoints
+- Implement research-map job creation
+- Implement job polling
+- Implement research-map retrieval
+- Implement the background job runner
+- Implement safe failure-code mapping
+- Implement startup recovery
+- Add latest-job repository queries
+- Add in-process duplicate-request locking
+- Add safe API error handling
+- Add multipart upload validation
+- Add paper-ID validation
+- Generate unit and API tests
+- Audit the implementation
+- Identify import-time IBM IAM behavior
+- Apply import/network-safety corrections
+- Strengthen concurrency and scheduling tests
+- Reconcile `validate=False`
+- Remove raw extraction exception text
+- Report final verification results
+
+### Human contribution
+
+The developer:
+
+- Defined the vertical-slice endpoint requirements
+- Reviewed Bob's first plan
+- Required correct multipart handling
+- Required hard upload-size enforcement
+- Required safe `UploadFile` closure
+- Required HTTP 415 for unsupported media
+- Required application-owned paper IDs
+- Required 503 before creating unavailable generation jobs
+- Required safe duplicate-runner claim behavior
+- Required latest-job map eligibility
+- Required an in-process job-creation lock
+- Required pending-job startup recovery
+- Required injectable application containers
+- Required no database transaction during inference
+- Required safe scheduling-failure handling
+- Required separate implementation and usage-log commits
+- Requested multiple Ask-mode audits
+- Required import and network safety
+- Required direct concurrency and scheduling tests
+- Required `validate=False` reconciliation
+- Required curated upload errors
+- Independently reviewed test totals and audit findings
+- Approved the completed vertical-slice backend
+
+### Outcome
+
+PaperScape gained a complete backend vertical slice.
+
+The completed backend now supports:
+
+- Safe multipart PDF upload
+- Synchronous page-aware PDF extraction
+- Durable extraction persistence
+- Asynchronous research-map job creation
+- Idempotent duplicate active-job handling
+- Background grounded research-map generation
+- Durable job lifecycle persistence
+- Safe machine-readable failure codes
+- Job-status polling
+- Latest-job-gated research-map retrieval
+- Startup recovery for non-durable background tasks
+- Lazy watsonx construction
+- Import and network-safe default behavior
+- Complete offline API and orchestration testing
+
+The backend vertical slice is ready to support the next phase:
+
+- Flutter PDF upload
+- Job-status polling
+- Research-map presentation
+- User-visible loading and failure states
