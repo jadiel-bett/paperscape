@@ -37,7 +37,10 @@ _log = logging.getLogger(__name__)
 
 _MAP_TEMPERATURE: float = 0.1
 _MAP_MAX_TOKENS: int = 1500
-_DISCLAIMER: str = "This map does not replace expert review."
+_DISCLAIMER: str = (
+    "This AI-generated explanation is grounded in the uploaded document but "
+    "does not replace expert review."
+)
 _CONTEXT_SENTINEL: str = "__PAPER_CONTEXT_JSON__"
 
 # Section-priority configuration.

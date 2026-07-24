@@ -741,7 +741,7 @@ All tests use `tmp_path`-backed file SQLite and fake extraction/map services. No
 | 25 | `test_latest_failed_job_hides_map` | Latest job is `failed` → 404 (orphan map after failed regen) |
 | 26 | `test_orphan_map_after_failed_regen` | Latest job `failed`, map exists → 404 |
 | 27 | `test_retrieval_performs_no_inference` | `LLMProvider.generate()` never called |
-| 28 | `test_disclaimer_unchanged` | `disclaimer` == `"This map does not replace expert review."` |
+| 28 | `test_disclaimer_unchanged` | `disclaimer` == `"This AI-generated explanation is grounded in the uploaded document but does not replace expert review."` |
 | 29 | `test_evidence_round_trip` | Evidence `chunk_id`, `page`, `excerpt` match |
 | 30 | `test_persistence_error_maps_to_500` | `PersistenceError` during retrieval → 500 |
 

@@ -85,7 +85,7 @@ The complete structured output of the research-map generation service.
 | `research_question` | `str` | The central research question identified by the model |
 | `findings` | `list[Finding]` | Exactly 3 findings |
 | `limitations` | `list[str]` | Limitations identified in the paper; must contain at least one item |
-| `disclaimer` | `Literal["This map does not replace expert review."]` | Fixed constant; any other value is rejected at validation |
+| `disclaimer` | `Literal["This AI-generated explanation is grounded in the uploaded document but does not replace expert review."]` | Fixed constant; any other value is rejected at validation |
 
 ---
 
@@ -166,7 +166,7 @@ Contains all fields from `Job`.
 - `Evidence.excerpt` must not exceed 300 characters.
 - `ResearchMap.findings` must contain exactly 3 items.
 - `ResearchMap.limitations` must contain at least one item.
-- `ResearchMap.disclaimer` is a fixed `Literal` constant: `"This map does not replace expert review."` — any other value is rejected by Pydantic validation.
+- `ResearchMap.disclaimer` is a fixed `Literal` constant: `"This AI-generated explanation is grounded in the uploaded document but does not replace expert review."` — any other value is rejected by Pydantic validation.
 - Every `Finding` must have at least one `Evidence` record.
 - Required string fields (`chunk_id`, `text`, `paper_id`, `filename`, `statement`, `chunk_id`, `excerpt`, `research_question`) must be non-blank; whitespace-only values are rejected and leading/trailing whitespace is stripped.
 - `ExtractionResult.chunks` must contain at least one `Chunk`.

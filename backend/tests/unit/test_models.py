@@ -264,7 +264,10 @@ def test_research_map_default_disclaimer() -> None:
         findings=_THREE_FINDINGS,
         limitations=["l1"],
     )
-    assert m.disclaimer == "This map does not replace expert review."
+    assert (
+        m.disclaimer
+        == "This AI-generated explanation is grounded in the uploaded document but does not replace expert review."
+    )
 
 
 def test_research_map_custom_disclaimer_rejected() -> None:

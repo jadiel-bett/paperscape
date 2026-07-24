@@ -31,7 +31,10 @@ from app.services.research_map_job_runner import ResearchMapJobRunner
 # Fixtures
 # ---------------------------------------------------------------------------
 
-_TEST_DISCLAIMER = "This map does not replace expert review."
+_TEST_DISCLAIMER = (
+    "This AI-generated explanation is grounded in the uploaded document but "
+    "does not replace expert review."
+)
 
 
 @pytest.fixture

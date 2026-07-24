@@ -213,7 +213,7 @@ job reaches `succeeded` status.
     }
   ],
   "limitations": ["string"],
-  "disclaimer": "This map does not replace expert review."
+  "disclaimer": "This AI-generated explanation is grounded in the uploaded document but does not replace expert review."
 }
 ```
 
