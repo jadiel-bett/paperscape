@@ -3196,3 +3196,306 @@ The backend vertical slice is ready to support the next phase:
 - Job-status polling
 - Research-map presentation
 - User-visible loading and failure states
+
+---
+
+## Sub-task 8 — Flutter Web Vertical Slice
+
+**Status:** Completed
+**Branch:** `feat/flutter-vertical-slice`
+**Disclaimer alignment commit:** `<fe7fe31>`
+**Flutter vertical slice commit:** `<1876d56>`
+
+### Objective
+
+Implement the Flutter Web vertical slice for PaperScape so a user can select a
+PDF, upload it to the backend, create and poll a research-map job, and view the
+grounded research map with findings, evidence, limitations, and the fixed
+expert-review disclaimer.
+
+The frontend needed to:
+
+- Keep file picking behind a `PdfPicker` abstraction.
+- Keep API calls behind `PaperScapeApiClient`.
+- Use Flutter `ChangeNotifier` rather than adding a state-management framework.
+- Avoid `dart:html` and direct browser APIs.
+- Avoid exposing backend secrets or watsonx configuration.
+- Upload PDFs as multipart form data with field name `file`.
+- Encode paper and job identifiers as safe route path segments.
+- Poll jobs safely with injectable timers and no real waits in tests.
+- Reject stale async completions from older workflows.
+- Render exactly three findings with confidence labels and selectable evidence.
+- Render page provenance, chunk IDs, limitations, and the canonical disclaimer.
+
+### Human decisions and review
+
+The developer directed the Sub-task 8 scope and reviewed the plan, audits, and
+correction passes.
+
+Human decisions included:
+
+- Approving the Flutter Web vertical-slice scope rather than adding unrelated
+  frontend frameworks or backend behavior.
+- Requiring `FilePicker` to remain behind `PdfPicker`.
+- Requiring `ChangeNotifier` as the only state-management approach.
+- Requiring API access through `PaperScapeApiClient`.
+- Requiring direct `http_parser` declaration only for the multipart PDF part
+  `Content-Type`.
+- Requiring deterministic polling tests using an injectable `TimerFactory` and
+  fake clock.
+- Requiring stale-response protection for upload, job creation, polling, and
+  map loading.
+- Requiring operation-specific retry behavior rather than a generic restart.
+- Requiring safe picker exception handling.
+- Requiring responsive narrow-layout and full offline workflow coverage.
+- Approving the canonical disclaimer alignment across product specification,
+  backend model/service output, evaluation fixtures, and frontend validation.
+- Explicitly approving the disclaimer alignment as a cross-layer contract
+  correction rather than a frontend-only change.
+- Directing that meaningful extra tests be preserved instead of reducing the
+  suite to an arbitrary earlier count.
+
+### Bob workflow
+
+#### Planning
+
+**Bob mode:** Plan
+
+Bob performed Sub-task 8 planning in Plan mode and produced the Flutter vertical
+slice plan:
+
+- `docs/subtask-8-flutter-vertical-slice-plan.md`
+
+The plan covered:
+
+- Flutter application structure.
+- Upload, job creation, polling, and research-map retrieval contracts.
+- DTO parsing for upload, job, and research-map responses.
+- Multipart upload behavior.
+- Route-segment encoding behavior.
+- Workflow state phases.
+- Polling lifecycle safety.
+- Responsive result rendering.
+- Accessibility and privacy constraints.
+- Offline test strategy.
+
+#### Plan audit
+
+**Bob mode:** Ask
+
+Bob performed a plan audit in Ask mode before implementation. The audit checked
+the proposed architecture against the product specification, data model,
+backend API contracts, dependency constraints, privacy rules, and testability
+requirements.
+
+The plan audit emphasized:
+
+- Keeping the frontend, document processing, retrieval, and inference concerns
+  separated.
+- Avoiding direct file-picker calls from widgets or controllers.
+- Avoiding direct browser APIs and `dart:html`.
+- Preserving page and chunk provenance in rendered output.
+- Ensuring generated factual claims remained tied to backend evidence records.
+- Avoiding live network calls, browser file dialogs, real polling waits, and
+  watsonx credentials in Flutter tests.
+
+#### Implementation
+
+**Bob mode:** Agent
+
+Bob implemented the Flutter Web vertical slice in Agent mode.
+
+Bob-generated implementation included:
+
+- Flutter app shell and local theme.
+- Runtime app configuration for the backend API base URL.
+- `SelectedPdf` domain object and validation helpers.
+- `PdfPicker` abstraction and `FilePickerPdfPicker` adapter.
+- Safe API exception and backend error-code mapping.
+- DTOs for `UploadResponse`, `JobCreateResponse`, `JobStatusResponse`,
+  `ResearchMap`, `Finding`, and `Evidence`.
+- `PaperScapeApiClient` with multipart PDF upload and typed response decoding.
+- `ResearchMapController` using `ChangeNotifier` and immutable state.
+- Polling with an injectable `TimerFactory` and clock.
+- Upload, job creation, polling, map loading, reset, dispose, and retry flows.
+- Responsive UI for selection, processing, failures, and ready-state research
+  maps.
+- Selectable evidence excerpts with page and chunk provenance.
+
+### Initial implementation and test-discovery findings
+
+The initial Flutter implementation had only one smoke test. Later test
+discovery confirmed that only two tests persisted in the relevant frontend test
+tree at that point. This was insufficient for the release gate because the
+workflow depended on multipart upload correctness, safe route construction,
+polling lifecycle behavior, stale-response rejection, operation-specific retry,
+and accessible rendering.
+
+The developer directed Bob to expand the test suite rather than treat the smoke
+coverage as adequate.
+
+### Bob audit findings
+
+**Bob mode:** Ask
+
+Bob performed multiple release-gate audits and correction passes. Audit findings
+included:
+
+- The initial test coverage was far below the required behavior surface.
+- API route tests mixed endpoint request assertions with an invalid response
+  fixture, causing a research-map parse failure unrelated to route encoding.
+- Several Completer-controlled tests accessed fake API completer collections
+  before the controller had registered the async operation.
+- The timeout retry path reused the original polling start timestamp and could
+  immediately time out again.
+- Picker/plugin exceptions were not converted into a curated safe state.
+- Poll-overlap prevention needed an executable test that truly kept one poll
+  unresolved while triggering another scheduled callback.
+- Reset and dispose safety needed stronger in-flight completion coverage.
+- Map-load retry and failed-job retry needed operation-specific proof.
+- The canonical disclaimer value needed to remain identical across the product
+  spec, backend, evaluation output, and frontend.
+
+### Human-directed correction passes
+
+**Bob mode:** Agent
+
+The developer directed Bob through correction passes that repaired production
+behavior and strengthened executable tests.
+
+Corrections included:
+
+- Multipart upload inspection proving:
+  - HTTP method `POST`
+  - multipart field name `file`
+  - filename preservation
+  - `application/pdf` media type
+  - exact selected byte preservation
+  - one file part
+  - no JSON or base64 upload
+  - no live network
+- Safe route-segment encoding tests for UUIDs, spaces, slashes, query
+  characters, fragments, percent input, and encoded-looking input.
+- TimerFactory-based deterministic polling tests with no sleeps or real waits.
+- Genuine poll-overlap prevention testing.
+- Timeout retry behavior that reuses the same job ID and receives a fresh
+  timeout window.
+- Stale upload, job-creation, poll, and map response rejection.
+- Reset safety covering selected PDF, byte reference, upload response, job ID,
+  job status, map, error, generation invalidation, and in-flight completions.
+- Dispose safety covering scheduled timers, timer callbacks, in-flight
+  completions, listener notifications, and notify-after-dispose behavior.
+- Operation-specific retry behavior:
+  - failed upload retries the same selected PDF
+  - failed job retry creates a new backend job for the same paper
+  - polling transport retry continues the same job
+  - map-load retry retrieves the same map without creating another generation
+    job
+- Safe picker exception handling that does not expose exception text, stack
+  traces, browser paths, or plugin internals.
+- Responsive narrow-layout widget testing with long wrapping evidence.
+- Full offline workflow test from PDF selection through ready-state rendering.
+- Canonical disclaimer alignment across product spec, backend public model,
+  backend application-controlled service output, persistence/API tests,
+  evaluation fixtures and expected output, frontend DTO validation, frontend
+  tests, and rendered UI.
+
+Flutter tests deliberately used no:
+
+- Live network
+- Browser file dialogs
+- Real polling waits
+- `Future.delayed` polling recursion
+- watsonx credentials
+
+### Final test expansion
+
+The frontend test suite was expanded to 42 passing tests covering:
+
+- API error sanitization.
+- Multipart upload request inspection.
+- Route-segment encoding safety.
+- Upload, job, and research-map DTO parsing.
+- Selected PDF validation.
+- Workflow state transitions.
+- Polling success, timeout, retry, and overlap behavior.
+- Stale upload, job, poll, and map completions.
+- Reset and dispose safety.
+- Operation-specific retry behavior.
+- Picker exception safety.
+- Responsive UI rendering.
+- Full offline workflow rendering.
+
+### Verification
+
+Final verification results:
+
+```text
+Backend tests: 422 passed, 5 existing warnings
+Offline evaluation: PASS
+Frontend tests: 42 passed
+flutter analyze: PASS
+flutter build web: PASS
+git diff --check: PASS
+```
+
+The backend warnings were existing third-party PyMuPDF/SWIG deprecation warnings
+and did not originate from PaperScape application code.
+
+### Bob contribution
+
+IBM Bob was used to:
+
+- Create the Sub-task 8 Flutter vertical-slice plan.
+- Audit the plan in Ask mode.
+- Implement the Flutter Web vertical slice in Agent mode.
+- Generate DTO, API-client, controller, widget, and workflow tests.
+- Run multiple release-gate audits.
+- Identify test-coverage gaps after initial smoke-test-only coverage.
+- Identify malformed route-test fixtures.
+- Identify incorrect asynchronous fake assumptions.
+- Identify timeout retry behavior that did not rebase the timeout window.
+- Implement production fixes.
+- Repair deterministic Completer-controlled tests.
+- Expand frontend tests to 42 passing tests.
+- Run backend, frontend, evaluation, formatting, analysis, build, and diff
+  verification commands.
+
+### Human contribution
+
+The developer:
+
+- Defined the Sub-task 8 frontend acceptance criteria.
+- Required the Bob Plan-mode implementation plan.
+- Requested the Ask-mode plan audit.
+- Reviewed the initial implementation and release-gate audit findings.
+- Identified that the initial smoke-test coverage was inadequate.
+- Directed Bob not to reduce tests to an arbitrary earlier count.
+- Approved the canonical disclaimer alignment as a cross-layer contract fix.
+- Directed multiple correction passes.
+- Required tests to genuinely prove stale-response, polling, retry, reset, and
+  dispose behavior.
+- Required no live network, browser dialogs, real polling waits, or watsonx
+  credentials in Flutter tests.
+- Reviewed the final verification results.
+
+### Outcome
+
+PaperScape gained a tested Flutter Web vertical slice that connects to the
+backend vertical slice without exposing credentials or backend internals.
+
+The completed frontend now supports:
+
+- PDF selection behind a domain picker abstraction.
+- Safe client-side PDF validation.
+- Multipart upload to the backend.
+- Research-map job creation.
+- Safe deterministic polling.
+- Timeout, retry, reset, and dispose behavior.
+- Stale-response rejection across all async workflow stages.
+- Evidence-backed research-map presentation.
+- Responsive narrow-layout rendering.
+- Exact disclaimer validation and display.
+
+The Flutter vertical slice is ready for commit after the recorded disclaimer
+alignment and vertical-slice commits are assigned their final hashes.
