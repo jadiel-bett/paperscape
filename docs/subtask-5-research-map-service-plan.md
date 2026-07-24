@@ -35,7 +35,7 @@ most one corrective retry for invalid output.
 # Named constants — referenced throughout the module
 _MAP_TEMPERATURE: float = 0.1
 _MAP_MAX_TOKENS: int = 1500
-_DISCLAIMER: str = "This map does not replace expert review."
+_DISCLAIMER: str = "This AI-generated explanation is grounded in the uploaded document but does not replace expert review."
 
 # Prompt template sentinel — replaced exactly once via str.replace()
 _CONTEXT_SENTINEL: str = "__PAPER_CONTEXT_JSON__"
@@ -612,7 +612,7 @@ limitations — all grounded with evidence.
 The committed expected `ResearchMap` produced by running the service with the
 extraction fixture and a `FakeEvalProvider` returning the model-response
 fixture.  `paper_id` is `"eval-paper-001"`.  `disclaimer` is
-`"This map does not replace expert review."`.
+`"This AI-generated explanation is grounded in the uploaded document but does not replace expert review."`.
 
 ### 11.4 `evals/run_evals.py`
 

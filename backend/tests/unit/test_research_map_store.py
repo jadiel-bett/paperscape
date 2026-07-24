@@ -55,7 +55,7 @@ def sample_map() -> ResearchMap:
             ),
         ],
         limitations=["Small sample size."],
-        disclaimer="This map does not replace expert review.",
+        disclaimer="This AI-generated explanation is grounded in the uploaded document but does not replace expert review.",
     )
 
 
@@ -82,7 +82,7 @@ def alt_map() -> ResearchMap:
             ),
         ],
         limitations=["Limited scope."],
-        disclaimer="This map does not replace expert review.",
+        disclaimer="This AI-generated explanation is grounded in the uploaded document but does not replace expert review.",
     )
 
 
@@ -142,7 +142,10 @@ def test_disclaimer_round_trips(store: ResearchMapStore, sample_map: ResearchMap
     store.save(sample_map)
     retrieved = store.get("paper-1")
     assert retrieved is not None
-    assert retrieved.disclaimer == "This map does not replace expert review."
+    assert (
+        retrieved.disclaimer
+        == "This AI-generated explanation is grounded in the uploaded document but does not replace expert review."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +250,7 @@ def test_paper_id_mismatch_raises_corrupt(db_path: str) -> None:
             ),
         ],
         limitations=["L1."],
-        disclaimer="This map does not replace expert review.",
+        disclaimer="This AI-generated explanation is grounded in the uploaded document but does not replace expert review.",
     )
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

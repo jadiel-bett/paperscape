@@ -4,7 +4,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-_DISCLAIMER = "This map does not replace expert review."
+_DISCLAIMER = (
+    "This AI-generated explanation is grounded in the uploaded document but "
+    "does not replace expert review."
+)
 
 
 class Evidence(BaseModel):
@@ -50,7 +53,9 @@ class ResearchMap(BaseModel):
     research_question: str = Field(min_length=1)
     findings: list[Finding] = Field(min_length=3, max_length=3)
     limitations: list[str] = Field(min_length=1)
-    disclaimer: Literal["This map does not replace expert review."] = _DISCLAIMER
+    disclaimer: Literal[
+        "This AI-generated explanation is grounded in the uploaded document but does not replace expert review."
+    ] = _DISCLAIMER
 
     @field_validator("paper_id", "research_question", mode="before")
     @classmethod

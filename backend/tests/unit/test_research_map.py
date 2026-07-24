@@ -474,7 +474,10 @@ class TestParsing:
         assert len(result.findings) == 3
         assert len(result.limitations) >= 1
         assert result.paper_id == "test-paper-id"
-        assert result.disclaimer == "This map does not replace expert review."
+        assert (
+            result.disclaimer
+            == "This AI-generated explanation is grounded in the uploaded document but does not replace expert review."
+        )
 
     def test_optional_json_code_fence_succeeds(self) -> None:
         """Response wrapped in ```json ... ``` is accepted."""
@@ -557,6 +560,15 @@ class TestParsing:
         data["disclaimer"] = "Hacked message."
         with pytest.raises(ValidationError):
             _InternalResearchMap.model_validate(data)
+
+    def test_service_supplies_exact_application_controlled_disclaimer(self) -> None:
+        service, _ = _make_service()
+        extraction = _make_extraction()
+        result = service.generate_map(extraction)
+        assert (
+            result.disclaimer
+            == "This AI-generated explanation is grounded in the uploaded document but does not replace expert review."
+        )
 
     def test_invalid_confidence_rejected(self) -> None:
         """Confidence value 'uncertain' rejected post-Pydantic."""

@@ -143,7 +143,7 @@ cross-field invariant, so no model validator is warranted.
    - `research_question: str`
    - `findings: list[Finding]` — `Field(min_length=3, max_length=3)`
    - `limitations: list[str]`
-   - `disclaimer: str = "This map does not replace expert review."`
+   - `disclaimer: str = "This AI-generated explanation is grounded in the uploaded document but does not replace expert review."`
 
 5. Do **not** add a model validator for finding count — the `Field` constraint
    above is sufficient and is the correct Pydantic v2 idiom for single-field
@@ -156,7 +156,7 @@ cross-field invariant, so no model validator is warranted.
 ### Relevant Context
 - Field definitions: `docs/data-model.md` § `backend/app/models/research_map.py`
 - The exact disclaimer string is a product invariant:
-  `"This map does not replace expert review."`
+  `"This AI-generated explanation is grounded in the uploaded document but does not replace expert review."`
 - `evidence` minimum length of 1 is stated in `docs/data-model.md` § Invariants.
 - `Literal` from `typing` is preferred over `enum.Enum` for the confidence
   field because it serializes cleanly to JSON strings without custom encoders,
@@ -532,7 +532,7 @@ All database tests use a shared `:memory:` connection.
    - Exactly 3 findings is accepted.
    - 2 findings raises `ValidationError`.
    - 4 findings raises `ValidationError`.
-   - Default `disclaimer` equals `"This map does not replace expert review."`.
+   - Default `disclaimer` equals `"This AI-generated explanation is grounded in the uploaded document but does not replace expert review."`.
    - Custom `disclaimer` value is accepted.
 
 8. **`JobStatus` tests:**

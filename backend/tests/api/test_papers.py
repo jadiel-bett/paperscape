@@ -25,7 +25,10 @@ from app.routers.papers import upload_paper
 # Constants
 # ---------------------------------------------------------------------------
 
-_TEST_DISCLAIMER = "This map does not replace expert review."
+_TEST_DISCLAIMER = (
+    "This AI-generated explanation is grounded in the uploaded document but "
+    "does not replace expert review."
+)
 
 
 # ---------------------------------------------------------------------------
