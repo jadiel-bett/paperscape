@@ -1,25 +1,49 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# PaperScape — Docker Compose stub
-# Full wiring will be completed in Phase 10 (Docker Compose and E2E Validation).
-# ──────────────────────────────────────────────────────────────────────────────
-
 services:
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    env_file:
-      - .env
+    environment:
+      DATABASE_URL: sqlite:////data/paperscape.db
+      UPLOAD_MAX_BYTES: ${UPLOAD_MAX_BYTES:-20971520}
+      CORS_ORIGINS: http://localhost:8080
+      WATSONX_API_KEY: ${COMPOSE_WATSONX_API_KEY:-}
+      WATSONX_PROJECT_ID: ${COMPOSE_WATSONX_PROJECT_ID:-}
+      WATSONX_URL: ${WATSONX_URL:-https://us-south.ml.cloud.ibm.com}
     ports:
       - "8000:8000"
-    # volumes and health-check to be added in Phase 10
+    volumes:
+      - paperscape_backend_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5).read()"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        PAPERSCAPE_API_BASE_URL: ${PAPERSCAPE_API_BASE_URL:-http://localhost:8000/api/v1}
     ports:
-      - "8080:80"
+      - "8080:8080"
     depends_on:
-      - backend
-    # nginx config to be added in Phase 10
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --quiet --tries=1 --spider http://127.0.0.1:8080/health || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  paperscape_backend_data:

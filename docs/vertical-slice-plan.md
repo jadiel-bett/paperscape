@@ -38,6 +38,50 @@ findings, limitations, and source evidence (chunk IDs + page numbers).
 
 ---
 
+## Sub-task 10 Status and Supersession Notes
+
+This section records implementation status that supersedes parts of the original
+historical vertical-slice plan below. The original descriptions are intentionally
+left in place for traceability; use this section as the current source for these
+items.
+
+- **Sub-task 9 status:** The original Sub-task 9 scope (job creation, polling,
+  failure handling, research-map retrieval, findings/evidence/limitations, and
+  disclaimer display) was completed inside the expanded Sub-task 8 Flutter
+  vertical slice. No separate Sub-task 9 implementation gap remains.
+- **Current upload route:** Upload uses `POST /api/v1/papers`, not the older
+  planned `POST /api/v1/papers/upload` route.
+- **Current upload success status:** Upload returns `201 Created`, not the older
+  planned `202 Accepted` status.
+- **Current active-job behavior:** `POST /api/v1/papers/{paper_id}/research-map-jobs`
+  is idempotent for active jobs. If a `pending` or `running` job already exists,
+  the route returns `202 Accepted` with the existing active job instead of `409`.
+- **Current frontend API setting:** Flutter Web uses the non-secret compile-time
+  value `PAPERSCAPE_API_BASE_URL`; do not use the obsolete `BACKEND_URL` name.
+  Changing this value requires rebuilding the Flutter Web app/image.
+- **Canonical disclaimer:** Research maps display exactly:
+
+  ```text
+  This AI-generated explanation is grounded in the uploaded document but does not replace expert review.
+  ```
+
+- **Current frontend layout:** The implemented Flutter vertical slice lives under
+  `frontend/lib/app` and `frontend/lib/features/research_map`, not the older
+  `frontend/lib/api` and `frontend/lib/screens` sketch below.
+- **Verified baseline before Sub-task 10 implementation:** The Sub-task 10 plan
+  records the current verified baseline as 422 backend tests passing, 42 frontend
+  tests passing, and the offline research-map evaluation passing. Sub-task 10
+  verification reports the updated totals after Docker and integration-test work.
+- **Sub-task 10 final verification baseline:** 424 backend tests were collected
+  and all 424 passed, including both Sub-task 10 integration tests. All 42
+  frontend tests passed, the offline ResearchMap evaluation passed, Flutter
+  analyze passed, and the Flutter Web release build passed.
+- **Docker ownership:** Production-like backend image, multi-stage Flutter Web
+  image, unprivileged nginx runtime, two-service Compose topology, named SQLite
+  volume, healthchecks, and Docker usage documentation are owned by Sub-task 10.
+
+---
+
 ## Repository Structure
 
 ```
