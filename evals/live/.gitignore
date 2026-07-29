@@ -1,0 +1,7 @@
+papers/**
+!papers/.gitkeep
+
+results/private/**
+!results/private/.gitkeep
+
+*.tmp
