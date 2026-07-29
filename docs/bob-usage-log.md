@@ -3499,3 +3499,660 @@ The completed frontend now supports:
 
 The Flutter vertical slice is ready for commit after the recorded disclaimer
 alignment and vertical-slice commits are assigned their final hashes.
+
+## Sub-task 9 — Frontend Polling and Research Map Screens
+
+**Status:** Completed as part of the expanded Sub-task 8 implementation  
+**Separate implementation commit:** None  
+**Primary implementation commit:** `1876d56` — `Add Flutter research map vertical slice`  
+**Usage-log commit:** `627028d` — `Document Sub-task 8 Bob usage`  
+**Merged through:** `74cefa3` — Merge of `feat/flutter-vertical-slice`
+
+### Scope reconciliation
+
+The original vertical-slice plan defined Sub-task 9 as the frontend work required to:
+
+- create a research-map generation job;
+- poll the job until completion;
+- display pending, running, failed, and succeeded states;
+- retrieve the persisted research map;
+- render the research question;
+- render exactly three findings;
+- display confidence levels;
+- display grounded evidence excerpts;
+- display one-based page provenance and chunk IDs;
+- display limitations;
+- display the canonical AI disclaimer;
+- expose appropriate retry and start-over actions.
+
+During implementation, this scope was incorporated into an expanded Sub-task 8 so that the complete Flutter vertical slice could be built and verified as one coherent workflow.
+
+No duplicate Sub-task 9 screen, controller, API client, polling service, or DTO layer was subsequently created.
+
+### Bob usage
+
+#### Plan mode
+
+Bob was used to inspect the existing Flutter scaffold and design a bounded frontend architecture covering:
+
+- compile-time backend configuration through `PAPERSCAPE_API_BASE_URL`;
+- API DTOs aligned to the current FastAPI contracts;
+- multipart PDF upload;
+- research-map job creation;
+- deterministic polling;
+- job timeout handling;
+- map retrieval;
+- controller state transitions;
+- operation-specific retry behavior;
+- stale asynchronous-operation guards;
+- responsive result presentation;
+- deterministic controller and widget testing.
+
+The plan separated responsibilities into:
+
+- application configuration;
+- API client and DTOs;
+- PDF selection abstraction;
+- controller/state workflow;
+- presentation widgets;
+- fake scheduler support for tests.
+
+#### Agent mode
+
+Bob implemented the Flutter Web vertical slice, including:
+
+- `PaperScapeApiClient`;
+- multipart upload using field name `file`;
+- `PdfPicker` abstraction;
+- `ResearchMapController`;
+- deterministic `TimerFactory`;
+- explicit workflow phases;
+- job creation and polling;
+- map retrieval;
+- timeout and retry handling;
+- stale upload/job/poll/map response protection;
+- route-safe identifier encoding;
+- picker exception handling;
+- reset and disposal safety;
+- responsive research-map presentation;
+- selectable evidence excerpts;
+- confidence indicators;
+- page and chunk provenance;
+- limitations;
+- canonical disclaimer rendering.
+
+The final frontend API contracts were:
+
+- `POST /api/v1/papers`
+- `POST /api/v1/papers/{paper_id}/research-map-jobs`
+- `GET /api/v1/jobs/{job_id}`
+- `GET /api/v1/papers/{paper_id}/research-map`
+
+The browser-visible backend configuration remained:
+
+`PAPERSCAPE_API_BASE_URL=http://localhost:8000/api/v1`
+
+### Ask-mode audits and corrections
+
+Bob Ask mode was used repeatedly to audit the implementation against the backend and product contracts.
+
+The audits identified and helped correct:
+
+- an outdated disclaimer value across frontend, backend, tests, documentation, and eval fixtures;
+- timeout retry behavior that did not initially rebase the polling timeout window;
+- missing or incomplete stale-operation coverage;
+- missing retry-path coverage;
+- route-encoding edge cases;
+- picker exception handling;
+- map-load retry semantics;
+- reset and disposal behavior;
+- duplicated or stale acceptance criteria from the original vertical-slice plan.
+
+The canonical disclaimer was aligned across all layers to:
+
+> This AI-generated explanation is grounded in the uploaded document but does not replace expert review.
+
+### Verified behavior
+
+The completed Sub-task 9 functionality proved:
+
+- upload-to-map workflow;
+- polling without overlapping requests;
+- timeout followed by retry of the same job;
+- failed-job retry through creation of a new job for the same paper;
+- map-load retry without creating a new job;
+- stale upload responses ignored;
+- stale job responses ignored;
+- stale polling responses ignored;
+- stale map responses ignored;
+- safe route construction for identifiers containing reserved characters;
+- picker exceptions converted into safe UI errors;
+- reset clears current state;
+- disposed controllers perform no later notifications or API work;
+- evidence remains selectable;
+- provenance remains visible;
+- the canonical disclaimer is enforced.
+
+### Verification baseline at completion
+
+- Backend tests: `422 passed`
+- Frontend tests: `42 passed`
+- `flutter analyze`: passed
+- Flutter Web release build: passed
+- Offline ResearchMap evaluation: passed
+- `git diff --check`: passed
+
+### Outcome
+
+The original Sub-task 9 was fully completed inside the expanded Sub-task 8.
+
+This was later documented explicitly in `docs/vertical-slice-plan.md` during Sub-task 10 so that the historical task definition remains visible without implying that duplicate frontend work is still pending.
+
+
+---
+
+## Sub-task 10 — Docker Compose and End-to-End Vertical-Slice Validation
+
+**Status:** Implemented and runtime-validated  
+**Plan document:** `docs/subtask-10-docker-compose-e2e-plan.md`  
+**Plan commit:** `<659aac1>`  
+**Implementation commit:** `<0f41eb5>`  
+**Bob usage-log commit:** `<SUBTASK_10_USAGE_LOG_COMMIT_HASH>`
+
+### Objective
+
+Sub-task 10 containerized and validated the existing PaperScape vertical slice:
+
+selectable-text PDF  
+→ Flutter Web upload  
+→ FastAPI extraction  
+→ persisted `ExtractionResult`  
+→ research-map job creation  
+→ background processing  
+→ polling  
+→ persisted `ResearchMap`  
+→ Flutter result display
+
+The implementation was intentionally limited to:
+
+- one backend container;
+- one frontend container;
+- SQLite persistence through a named volume;
+- FastAPI `BackgroundTasks`;
+- an unprivileged nginx runtime;
+- deterministic backend integration tests;
+- credential-free Docker smoke validation;
+- optional manual live-watsonx validation.
+
+The task did not introduce Redis, Celery, PostgreSQL, a separate worker, authentication, OCR, Kubernetes, Terraform, CI/CD, cloud deployment, or production TLS.
+
+### Bob usage
+
+#### Plan mode
+
+Bob inspected the repository and produced:
+
+`docs/subtask-10-docker-compose-e2e-plan.md`
+
+The plan covered:
+
+- current Docker and Compose state;
+- backend image design;
+- Flutter Web multi-stage build;
+- unprivileged nginx runtime;
+- browser-visible API configuration;
+- CORS;
+- SQLite volume persistence;
+- credential handling;
+- deterministic integration testing;
+- container smoke validation;
+- browser walkthrough;
+- acceptance-criteria reconciliation;
+- implementation order;
+- rollback strategy.
+
+The original plan initially proposed several assumptions that were subsequently tightened through audit, including:
+
+- Python runtime version;
+- credential-free startup behavior;
+- Granite configuration defaults;
+- fake-provider test design;
+- SQLite parent-directory ownership;
+- nginx healthcheck tooling;
+- exact Windows verification commands.
+
+#### Ask-mode plan audit
+
+Bob Ask mode audited the proposed plan against the current repository.
+
+The audit confirmed:
+
+- Python `3.12.10` was the established backend baseline;
+- `python:3.12.10-slim-bookworm` existed;
+- `ghcr.io/cirruslabs/flutter:3.24.5` existed;
+- `nginxinc/nginx-unprivileged:1.27-alpine` existed;
+- missing watsonx credentials were accepted by `Settings`;
+- provider construction was lazy;
+- credential-free job creation should return `generation_unavailable`;
+- `sqlite:////data/paperscape.db` resolved to `/data/paperscape.db`;
+- the integration test could use a fake `LLMProvider` with the real `ResearchMapService`;
+- the selected failure path should persist `llm_provider_error`;
+- failed map retrieval should return `map_not_found`.
+
+The plan was corrected before implementation.
+
+### Agent-mode implementation
+
+Bob created:
+
+- `backend/Dockerfile`
+- `backend/.dockerignore`
+- `frontend/Dockerfile`
+- `frontend/nginx.conf`
+- `frontend/.dockerignore`
+- `backend/tests/integration/test_pipeline.py`
+
+Bob modified:
+
+- `docker-compose.yml`
+- `.env.example`
+- `backend/.env.example`
+- `frontend/README.md`
+- `docs/vertical-slice-plan.md`
+
+### Backend image
+
+The backend image uses:
+
+`python:3.12.10-slim-bookworm`
+
+Recorded image digest:
+
+`sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db`
+
+The image:
+
+- installs the pinned backend requirements;
+- copies only the runtime application source;
+- does not copy `.env`;
+- does not copy the local virtual environment;
+- creates the `paperscape` group and user;
+- runs with UID/GID `10001:10001`;
+- creates `/data`;
+- runs Uvicorn with one worker;
+- exposes port `8000`;
+- uses no unnecessary system packages.
+
+Runtime command:
+
+`uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1`
+
+### Frontend image
+
+The Flutter builder uses:
+
+`ghcr.io/cirruslabs/flutter:3.24.5`
+
+Recorded image digest:
+
+`sha256:10e0449fb853a5826091cbea6ed215d260d76d37b11453149bead5b09b80fc64`
+
+The image reported:
+
+- Flutter `3.24.5`
+- Dart `3.5.4`
+- DevTools `2.37.3`
+
+The runtime uses:
+
+`nginxinc/nginx-unprivileged:1.27-alpine`
+
+Recorded image digest:
+
+`sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0`
+
+The Flutter build receives only the non-secret compile-time value:
+
+`PAPERSCAPE_API_BASE_URL=http://localhost:8000/api/v1`
+
+No watsonx credential, project ID, model configuration, or database value is passed into Flutter assets.
+
+### Docker Compose topology
+
+`docker-compose.yml` defines exactly two services:
+
+- `backend`
+- `frontend`
+
+Backend behavior:
+
+- host/container port: `8000:8000`;
+- database URL: `sqlite:////data/paperscape.db`;
+- persistent named volume mounted at `/data`;
+- CORS origin: `http://localhost:8080`;
+- Python-stdlib healthcheck on `/api/v1/health`;
+- restart policy: `unless-stopped`.
+
+Frontend behavior:
+
+- host/container port: `8080:8080`;
+- depends on a healthy backend;
+- builds with `PAPERSCAPE_API_BASE_URL=http://localhost:8000/api/v1`;
+- healthcheck uses `/health`;
+- restart policy: `unless-stopped`.
+
+The browser calls `localhost:8000`, not the Compose service hostname, because the Flutter application executes in the user's browser.
+
+### Compose credential handling
+
+The root Compose configuration uses:
+
+- `COMPOSE_WATSONX_API_KEY`
+- `COMPOSE_WATSONX_PROJECT_ID`
+
+These are mapped into the backend container as:
+
+- `WATSONX_API_KEY`
+- `WATSONX_PROJECT_ID`
+
+This was introduced after `docker compose config` revealed that an existing root `.env` contained stale direct-development placeholder values under the normal `WATSONX_*` names.
+
+The Compose-specific names prevent stale placeholder credentials from being forwarded accidentally.
+
+Direct backend development continues to use the normal variables documented in `backend/.env.example`.
+
+Compose does not currently expose a root `GRANITE_MODEL_ID` override and relies on the backend application's configured default.
+
+### Integration test implementation
+
+`backend/tests/integration/test_pipeline.py` adds two tests.
+
+The test pipeline uses:
+
+- a programmatically generated selectable-text PDF;
+- temporary file-backed SQLite;
+- real FastAPI routes;
+- real `ExtractionService`;
+- real `ExtractionStore`;
+- real `JobStore`;
+- real `ResearchMapStore`;
+- real `ResearchMapService`;
+- real `ResearchMapJobRunner`;
+- real `run_research_map_job` background adapter;
+- fake `LLMProvider` only;
+- no network;
+- no watsonx credentials;
+- no sleeps;
+- no committed binary fixture.
+
+The happy path proves:
+
+- PDF upload returns `201`;
+- extraction is persisted;
+- job creation returns `202`;
+- FastAPI schedules the real background adapter;
+- the real runner completes;
+- job status becomes `succeeded`;
+- the persisted map can be retrieved;
+- exactly three findings are returned;
+- each finding has grounded evidence;
+- evidence references real extracted chunk IDs, pages, and excerpts;
+- pages are one-based;
+- limitations are non-empty;
+- the canonical disclaimer is exact;
+- the fake provider is called exactly once;
+- no corrective generation retry occurs.
+
+The failure path proves:
+
+- the fake provider raises `LLMProviderError`;
+- the real route-scheduled adapter executes;
+- job status becomes `failed`;
+- the safe persisted/public error is `llm_provider_error`;
+- the raw provider message is not exposed;
+- map retrieval returns `404`;
+- the safe response code is `map_not_found`.
+
+### Deterministic PDF generation
+
+The integration test generates the PDF in memory using PyMuPDF.
+
+The helper uses fixed:
+
+- content;
+- page dimensions;
+- text coordinates;
+- metadata;
+- serialization settings;
+- document-ID behavior.
+
+Two independent calls return identical bytes.
+
+Recorded SHA-256:
+
+`03290709491d45c886992dd2f8bcd7135682bae107e8031a834a122b5f3593bf`
+
+The PDF retains:
+
+- a valid `%PDF-` header;
+- selectable text;
+- at least one page;
+- at least one extraction chunk.
+
+### Static audits and corrections
+
+Bob Ask mode identified and helped correct:
+
+- incomplete SQLite ignore patterns;
+- lack of an explicit successful-provider call-count assertion;
+- ambiguous Compose credential naming documentation;
+- a no-op replacement of `run_research_map_job` in the initial integration test;
+- nondeterministic PDF serialization;
+- inaccurate root Compose documentation for `GRANITE_MODEL_ID`;
+- missing Sub-task 10 test-baseline documentation.
+
+The final integration tests no longer patch:
+
+- `run_research_map_job`;
+- `BackgroundTasks.add_task`;
+- `ResearchMapJobRunner.run`;
+- `ResearchMapService.generate`;
+- repository methods.
+
+No manual `runner.run()` call occurs after the job-creation request.
+
+### nginx runtime issue and correction
+
+The first frontend container build succeeded, but the container repeatedly exited with:
+
+`unknown directive "8,}\.(js|css|png|jpg|jpeg|gif|svg|woff2?)$"`
+
+The issue was traced to an unquoted nginx regular-expression location containing the `{8,}` quantifier.
+
+Original form:
+
+`location ~* ^/(assets|canvaskit)/.+\.[0-9a-f]{8,}\.(...)$`
+
+Corrected form:
+
+`location ~* "^/(assets|canvaskit)/.+\.[0-9a-f]{8,}\.(...)$"`
+
+After correction:
+
+- `nginx -t` passed;
+- the frontend container became healthy;
+- restart count remained `0`;
+- `/health` returned `ok`;
+- `/` returned HTTP `200`;
+- `index.html` returned `Cache-Control: no-store`.
+
+The nginx entrypoint message stating that it could not modify `default.conf` was determined to be harmless because the supplied configuration did not require the entrypoint's IPv6 rewrite.
+
+### Docker runtime validation
+
+Docker runtime validation confirmed:
+
+- Docker Desktop Linux engine available;
+- backend image built;
+- frontend image built;
+- backend container healthy;
+- frontend container healthy;
+- frontend restart count `0`;
+- backend runs as UID/GID `10001:10001`;
+- `/data` is writable;
+- database path is `/data/paperscape.db`;
+- SQLite journal mode is `wal`;
+- backend health returns `{"status":"ok"}`;
+- frontend health returns `ok`;
+- frontend root returns HTTP `200`;
+- nginx serves `index.html` with `Cache-Control: no-store`;
+- no native-library import failure occurred;
+- no SQLite permission error occurred;
+- no credential was printed in logs.
+
+### Credential-free smoke validation
+
+A synthetic selectable-text PDF was uploaded to the containerized backend.
+
+Result:
+
+- HTTP status: `201 Created`
+- filename: `paperscape-smoke.pdf`
+- page count: `1`
+- chunk count: `1`
+
+A research-map generation request was then submitted without watsonx credentials.
+
+Result:
+
+- HTTP status: `503 Service Unavailable`
+- response code: `generation_unavailable`
+- jobs before request: `0`
+- jobs after request: `0`
+
+This confirmed that:
+
+- application startup does not require watsonx credentials;
+- upload and extraction remain available;
+- provider construction remains unavailable safely;
+- no pending job is created when generation cannot be configured.
+
+### CORS validation
+
+A browser-style preflight request from:
+
+`http://localhost:8080`
+
+returned:
+
+- HTTP `200`;
+- `Access-Control-Allow-Origin: http://localhost:8080`;
+- `Access-Control-Allow-Credentials: true`;
+- the expected allowed HTTP methods.
+
+### SQLite volume persistence
+
+Before normal Compose shutdown:
+
+- extraction count: `1`
+
+After:
+
+- `docker compose down`
+- `docker compose up -d --wait`
+
+the extraction count remained:
+
+- `1`
+
+Both services returned healthy after recreation.
+
+`docker compose down -v` was not used, so the named SQLite volume was preserved.
+
+### Final verification baseline
+
+Backend:
+
+- `pip check`: passed
+- tests collected: `424`
+- tests passed: `424`
+- Sub-task 10 integration tests: `2 passed`
+- offline ResearchMap evaluation: passed
+
+Frontend:
+
+- `flutter pub get`: passed
+- formatting check: passed
+- `flutter analyze`: passed
+- Flutter tests: `42 passed`
+- Flutter Web release build: passed
+
+Docker:
+
+- `docker compose config`: passed
+- backend image build: passed
+- frontend image build: passed
+- backend healthcheck: passed
+- frontend healthcheck: passed
+- nginx configuration test: passed
+- credential-free smoke test: passed
+- CORS test: passed
+- named-volume persistence test: passed
+
+Repository:
+
+- `git diff --check`: passed
+- no temporary smoke files remained
+- no real credentials were present
+- no production backend or Flutter application source was modified
+
+### Bob contribution
+
+Bob was used for:
+
+- repository inspection;
+- implementation planning;
+- Dockerfile and Compose implementation;
+- integration-test implementation;
+- documentation updates;
+- static code audits;
+- environment-contract audits;
+- security and secret-handling audits;
+- integration-test realism audits;
+- nginx failure diagnosis;
+- targeted release-gate corrections;
+- final verification planning.
+
+The iterative Plan → Agent → Ask → Agent workflow was especially useful for catching issues that ordinary unit tests did not expose, including:
+
+- browser-visible versus container-visible API URLs;
+- stale credential interpolation;
+- nginx regex parsing;
+- fake-provider test realism;
+- background-task adapter coverage;
+- deterministic fixture generation;
+- SQLite volume ownership;
+- safe credential-free behavior.
+
+### Human validation and decisions
+
+Manual human actions remained necessary for:
+
+- starting Docker Desktop;
+- executing Docker pull/build/run commands;
+- reviewing container logs;
+- running the browser-facing smoke requests;
+- verifying CORS headers;
+- checking volume persistence;
+- approving the Compose-specific credential naming;
+- deciding not to introduce a production runtime fake-provider mode;
+- confirming the nginx entrypoint warning was non-blocking;
+- approving final commit boundaries.
+
+### Outcome
+
+Sub-task 10 produced a reproducible two-container local environment and a deterministic backend integration suite that validates the complete research-map pipeline without live watsonx access.
+
+Successful map generation remains available as an optional manual test when valid backend-only watsonx credentials are supplied.
+
+The default automated and credential-free workflows remain network-independent and safe.
