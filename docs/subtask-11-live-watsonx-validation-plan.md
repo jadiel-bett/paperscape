@@ -94,7 +94,7 @@ Direct backend configuration uses:
 |---|---|
 | `WATSONX_API_KEY` | Empty by default; a non-empty value enables job creation. |
 | `WATSONX_PROJECT_ID` | Empty by default; required for successful project-scoped inference. |
-| `WATSONX_URL` | Defaults to `https://us-south.ml.cloud.ibm.com`. |
+| `WATSONX_URL` | The application currently defaults to `https://us-south.ml.cloud.ibm.com`; Frankfurt live validation must explicitly override it with `https://eu-de.ml.cloud.ibm.com`. |
 | `GRANITE_MODEL_ID` | Defaults to `ibm/granite-13b-instruct-v2`. |
 
 Compose reads backend-only credentials from:
@@ -116,8 +116,9 @@ The following facts were verified during planning on **29 July 2026**:
 
 1. `ibm/granite-13b-instruct-v2` was withdrawn on 15 October 2025 and is not a
    usable live baseline.
-2. `ibm/granite-4-h-small` is the candidate supported pay-per-token Granite
-   model for this validation.
+2. `ibm/granite-4-h-small` is currently listed for provided pay-per-token
+   inference in Frankfurt and is the candidate Granite model for this
+   validation.
 3. The watsonx.ai text-generation API is deprecated and scheduled for removal
    on 14 March 2027.
 4. Current Granite 4 documentation emphasizes Chat API use. The presence of the
@@ -173,6 +174,7 @@ If Tier A shows that the candidate model cannot use the existing text-generation
 path, stop and record the blocker. Do not automatically:
 
 - choose another model;
+- switch regions;
 - upgrade the SDK;
 - migrate to the Chat API;
 - change the `LLMProvider` interface;
@@ -185,23 +187,52 @@ provider-migration decision.
 
 ## 4. Credential, region, and service readiness
 
-### 4.1 Required live configuration
+### 4.1 Selected Frankfurt deployment baseline
+
+PaperScape selects Frankfurt for this validation:
+
+| Item | Selected value |
+|---|---|
+| Region | Frankfurt |
+| IBM region code | `eu-de` |
+| API endpoint | `https://eu-de.ml.cloud.ibm.com` |
+| watsonx.ai Runtime plan | Lite |
+
+The PaperScape project and its associated watsonx.ai Runtime must both be
+created in Frankfurt. A Runtime created in another region does not satisfy this
+baseline even if it belongs to the same IBM Cloud account.
+
+`ibm/granite-4-h-small` is currently listed for provided pay-per-token inference
+in Frankfurt. This listing is necessary but not sufficient: Tier A must still
+prove PaperScape project entitlement and `generate_text` compatibility through
+the Frankfurt endpoint.
+
+Actual latency from Kenya must be measured during validation rather than
+assumed from geographic proximity or region labels.
+
+Dallas remains a fallback only if a verified Frankfurt-specific compatibility
+blocker occurs. A failed call must be classified and recorded; it must not
+automatically trigger a region switch. Any move to Dallas requires a separate,
+explicit decision supported by evidence that the blocker is specific to
+Frankfurt.
+
+### 4.2 Required live configuration
 
 A successful live run requires:
 
 - a non-empty watsonx API key;
 - a non-empty project ID;
-- a project hosted in the intended IBM Cloud region;
-- `WATSONX_URL` pointing to the matching regional watsonx.ai service;
-- an associated and usable watsonx.ai Runtime service;
+- a PaperScape project created in Frankfurt (`eu-de`);
+- `WATSONX_URL=https://eu-de.ml.cloud.ibm.com`;
+- an associated and usable Lite-plan watsonx.ai Runtime created in Frankfurt;
 - permission to perform project-scoped foundation-model inference;
-- access to the candidate model through the selected project and region;
+- project entitlement to the candidate model through Frankfurt;
 - available quota and billing authorization.
 
 Do not infer a project's region from the UUID. Confirm the region manually in
 the IBM Cloud or watsonx project UI.
 
-### 4.2 Safe readiness checklist
+### 4.3 Safe readiness checklist
 
 Before any paid test:
 
@@ -209,10 +240,11 @@ Before any paid test:
 2. Confirm `WATSONX_LIVE_ACK_CHARGES` is exactly `1`.
 3. Confirm `WATSONX_API_KEY` is present without inspecting or displaying it.
 4. Confirm `WATSONX_PROJECT_ID` is present.
-5. Confirm the project region manually.
-6. Confirm an explicitly supplied `WATSONX_URL` is present and matches that
-   region.
-7. Confirm a watsonx.ai Runtime service is associated with the project.
+5. Confirm the PaperScape project was created in Frankfurt (`eu-de`).
+6. Confirm `WATSONX_URL` is explicitly supplied as
+   `https://eu-de.ml.cloud.ibm.com`.
+7. Confirm a Lite-plan watsonx.ai Runtime created in Frankfurt is associated
+   with the project.
 8. Confirm the candidate model appears in Resource Hub or Prompt Lab for that
    project.
 9. Confirm the account has suitable project inference permissions.
@@ -244,7 +276,7 @@ It must not contain:
 Do not run output-producing `docker compose config` after credentials are
 present. Use `docker compose config --quiet`.
 
-### 4.3 Validation timing
+### 4.4 Validation timing
 
 Configuration is not fully validated at startup:
 
@@ -509,8 +541,10 @@ Required behavior:
 Tier A must prove:
 
 - credentials authenticate;
-- the project and endpoint work together;
-- the candidate model is accessible;
+- the Frankfurt project and `https://eu-de.ml.cloud.ibm.com` endpoint work
+  together;
+- the PaperScape project is entitled to access the candidate model in
+  Frankfurt;
 - the installed SDK can construct the client;
 - `generate_text` works with the candidate model;
 - the current parameter shape is accepted;
@@ -1098,7 +1132,7 @@ private method that does not echo them. Then set only the non-secret controls:
 ```powershell
 $env:WATSONX_LIVE_TEST = '1'
 $env:WATSONX_LIVE_ACK_CHARGES = '1'
-$env:WATSONX_URL = 'https://us-south.ml.cloud.ibm.com'
+$env:WATSONX_URL = 'https://eu-de.ml.cloud.ibm.com'
 $env:GRANITE_MODEL_ID = 'ibm/granite-4-h-small'
 
 backend\.venv\Scripts\python.exe -m pytest `
@@ -1224,7 +1258,9 @@ Do not use `docker compose down -v` during validation.
 | Current default is withdrawn | Use only an explicit Granite 4 override for Tier A; promote the default after success. |
 | Candidate model lacks `generate_text` compatibility | Stop and require a provider-migration decision. |
 | Candidate model is unavailable to the project | Confirm Resource Hub/Prompt Lab access, then stop on Tier A failure. |
-| Project and endpoint regions differ | Verify both manually; do not infer region from UUID. |
+| Frankfurt project, Runtime, and endpoint regions differ | Create both the project and Lite Runtime in Frankfurt and use `https://eu-de.ml.cloud.ibm.com`; do not infer region from UUID. |
+| A Frankfurt call fails | Classify and verify whether the blocker is Frankfurt-specific; do not automatically switch regions. Dallas requires a separate, evidence-backed fallback decision. |
+| Kenya latency is assumed rather than measured | Record actual construction, inference, and workflow latency from Kenya during the approved live validation. |
 | SDK performs construction requests | Pinned source confirms authentication during construction; gate every import/construction path and instrument authentication separately where approved. |
 | Hidden SDK retries or SSL fallback increase requests | Four retry-loop iterations can produce five raw transport requests; Tier A and Tier B conservative bounds are ten and twenty respectively, excluding authentication/construction requests. Tier A remains blocked until Decision A or Decision B is approved. |
 | Cost bounding weakens TLS security | Decision A must preserve certificate validation and may not use `verify=False`, suppress certificate errors, patch site-packages, silently replace transport, or reduce security controls. |
@@ -1267,9 +1303,10 @@ attempts are therefore mandatory before execution.
    `RetryTransport`, SSL fallback, authentication, and measurable request
    counts. Decision B must explicitly accept the conservative ten-request Tier A
    bound and associated quota/billing risk.
-6. Confirm credentials, project, region, Runtime association, model visibility,
-   permission, quota, billing readiness, and the approved attempt ceiling without
-   printing secrets.
+6. Confirm credentials, the Frankfurt project, the Frankfurt Lite Runtime
+   association, the `eu-de` endpoint, model visibility, project entitlement,
+   permission, quota, billing readiness, and the approved attempt ceiling
+   without printing secrets.
 7. Only then run Tier A alone with the explicit Granite 4 environment override.
 8. If Tier A fails, record the blocker and stop.
 9. If Tier A succeeds, begin Stage 2: update the application model default,
@@ -1287,9 +1324,10 @@ attempts are therefore mandatory before execution.
 18. Run Tier C with the approved primary paper.
 19. Verify backend persistence after restart.
 20. Perform secret, log, browser, and repository-hygiene checks.
-21. Record actual test totals, latency, observable retry-loop iterations, raw
-    requests, SSL-fallback requests, authentication requests, unknown
-    unobservable counts, model/API risks, and final acceptance status.
+21. Record actual test totals, measured latency from Kenya, observable
+    retry-loop iterations, raw requests, SSL-fallback requests, authentication
+    requests, unknown unobservable counts, model/API risks, and final acceptance
+    status.
 
 ## 20. Acceptance criteria
 
@@ -1308,8 +1346,13 @@ Sub-task 11 is complete only when:
   Tier A bound and associated quota/billing risk.
 - Tier A succeeds with `ibm/granite-4-h-small` supplied as an explicit process
   override.
+- The PaperScape project and associated Lite-plan watsonx.ai Runtime were both
+  created in Frankfurt (`eu-de`) and validation used
+  `https://eu-de.ml.cloud.ibm.com`.
 - The pinned SDK, `ModelInference`, `generate_text`, project, endpoint, current
   parameters, and candidate model are proven compatible together.
+- Tier A proves project entitlement and `generate_text` compatibility in
+  Frankfurt.
 - The application default is promoted only after Tier A succeeds.
 - All existing backend tests continue passing after the promotion.
 - New live tests skip by default and make zero network calls during ordinary
@@ -1332,7 +1375,10 @@ Sub-task 11 is complete only when:
 - The conservative theoretical raw-request bounds are recorded as ten for Tier A
   and twenty for Tier B, excluding authentication/provider-construction
   requests; they are not represented as approved paid-call ceilings.
-- Latency and final job status are recorded.
+- Actual latency from Kenya and final job status are recorded.
+- Dallas is used only after a verified Frankfurt-specific compatibility blocker
+  and a separate explicit fallback decision; no failed call automatically
+  switches regions.
 - No credentials appear in Git, Flutter, logs, screenshots, stored outputs, or
   captured diagnostics.
 - Frontend tests and analysis pass.
@@ -1361,8 +1407,14 @@ Sub-task 11 is complete only when:
    requests for Tier A and twenty for Tier B, excluding authentication and
    provider-construction requests.
 9. Decision A may not weaken normal TLS certificate verification.
-10. Credential readiness, project entitlement, candidate-model access, and
-   `generate_text` compatibility remain live prerequisites.
-11. The withdrawn current model default must not be used for live validation.
-12. Audience adaptation begins only after Tier A, Tier B, Tier C, and the
+10. Frankfurt (`eu-de`) is selected with
+    `https://eu-de.ml.cloud.ibm.com`; the PaperScape project and associated
+    Lite-plan Runtime must both be created there.
+11. Credential readiness, project entitlement, candidate-model access, and
+    `generate_text` compatibility remain live prerequisites.
+12. Actual latency from Kenya must be measured rather than assumed.
+13. Dallas is a fallback only for a verified Frankfurt-specific compatibility
+    blocker, and a failed call must never switch regions automatically.
+14. The withdrawn current model default must not be used for live validation.
+15. Audience adaptation begins only after Tier A, Tier B, Tier C, and the
     three-paper scorecard succeed.
