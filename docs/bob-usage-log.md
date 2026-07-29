@@ -3657,7 +3657,7 @@ This was later documented explicitly in `docs/vertical-slice-plan.md` during Sub
 **Plan document:** `docs/subtask-10-docker-compose-e2e-plan.md`  
 **Plan commit:** `<659aac1>`  
 **Implementation commit:** `<0f41eb5>`  
-**Bob usage-log commit:** `<SUBTASK_10_USAGE_LOG_COMMIT_HASH>`
+**Bob usage-log commit:** `<caef33d>`
 
 ### Objective
 
