@@ -4357,3 +4357,24 @@ ResearchMap validation issue-code names across the initial attempt, corrective
 attempt, and background runner boundary. The persisted/public job error remains
 `map_generation_failed`. No prompt or validation rule was changed, and a paid
 diagnostic rerun has not yet occurred.
+
+### Evidence-normalization preparation
+
+The first real generation attempt failed only `EXCERPT_NOT_FOUND`; the
+corrective attempt then failed `INVALID_SCHEMA`. A conservative
+representation-normalization change was added only to evidence excerpt
+containment to tolerate harmless PDF extraction and model text-serialization
+artifacts.
+
+The change retains exact chunk ID and page validation plus contiguous substring
+containment. It introduces no fuzzy, semantic, or paraphrase matching. No paid
+rerun occurred during implementation.
+
+#### Boundary-integrity correction
+
+A read-only follow-up audit showed that shorter contiguous substrings could omit
+leading signs or qualifiers and trailing percentages, units, range bounds, or
+parts of numbers or apostrophe/hyphen-joined words. Deterministic
+evidence-boundary checks were added to reject those truncations while preserving
+exact normalized substring matching and established long-excerpt behavior. No
+fuzzy or semantic similarity was introduced, and no paid rerun occurred.

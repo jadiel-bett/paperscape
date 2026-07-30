@@ -1653,3 +1653,24 @@ ResearchMap validation issue-code names for the initial and corrective attempts.
 The job runner records the same safe codes while continuing to persist only
 `map_generation_failed`. No prompt or validation rule changed, and no paid
 diagnostic rerun has occurred.
+
+## 23. Tier C evidence-normalization preparation
+
+The safe diagnostics established that the first real generation attempt failed
+only `EXCERPT_NOT_FOUND`, while its corrective attempt failed
+`INVALID_SCHEMA`. A conservative evidence-containment normalization was added
+for harmless PDF and text-serialization representation differences only.
+
+Chunk ID and page matching remain exact, and normalized excerpts must remain
+contiguous substrings of their referenced source chunks. No fuzzy, semantic, or
+paraphrase matching was introduced. No paid diagnostic rerun occurred during
+implementation.
+
+### Boundary-integrity correction
+
+A follow-up audit found that bare substring containment could accept truncated
+evidence beginning after a sign or qualifier, ending before a percentage or
+unit, or stopping within a number, apostrophe/hyphen-joined word, or confidence
+interval. Deterministic boundary guards now reject those cases while retaining
+exact contiguous normalized matching and the established long-excerpt behavior.
+No fuzzy or semantic similarity was introduced, and no paid rerun occurred.

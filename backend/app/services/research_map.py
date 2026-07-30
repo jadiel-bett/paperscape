@@ -132,6 +132,121 @@ def _normalize_text(text: str) -> str:
     return collapsed.strip()
 
 
+_EVIDENCE_PUNCTUATION_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2015": "-",
+    }
+)
+# Letters only: numeric ranges and signed values must retain their dash.
+_WORD_INTERNAL_PDF_HYPHENATION = re.compile(
+    r"(?<=[^\W\d_])-\s+(?=[^\W\d_])",
+    flags=re.UNICODE,
+)
+_OMITTED_LEADING_QUALIFIER = re.compile(
+    r"(?:"
+    r"\b(?:may|might|can|could|would|should|not|no|"
+    r"possibly|probably|likely|unlikely|approximately|about|around|nearly|"
+    r"potentially|perhaps|generally|often|sometimes|typically|roughly|only)"
+    r"|\bat\s+(?:least|most)"
+    r"|\bup\s+to"
+    r")\s+$",
+    flags=re.UNICODE,
+)
+_OMITTED_TRAILING_QUALIFIER = re.compile(
+    r"^\s*(?:[,;:]\s*)?"
+    r"(?:possibly|probably|likely|unlikely|approximately|potentially|perhaps|"
+    r"generally|often|sometimes|typically|roughly|only)\b",
+    flags=re.UNICODE,
+)
+_TRUNCATED_NUMERIC_SUFFIX = re.compile(
+    r"(?:"
+    r"[.,]\d"
+    r"|\s*[%\u2030\u00b0]"
+    r"|\s*[+\-\u2212]\s*\d"
+    r"|\s+[^\W\d_]"
+    r")",
+    flags=re.UNICODE,
+)
+
+
+def _normalize_evidence_text(text: str) -> str:
+    """Normalize bounded representation artifacts for excerpt containment."""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = normalized.replace("\u00ad", "")
+    normalized = normalized.translate(_EVIDENCE_PUNCTUATION_TRANSLATION)
+    normalized = _WORD_INTERNAL_PDF_HYPHENATION.sub("", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _has_safe_evidence_boundaries(source: str, start: int, end: int) -> bool:
+    """Reject substring matches that truncate words or semantic modifiers."""
+    excerpt = source[start:end]
+
+    if start > 0 and source[start - 1].isalnum() and excerpt[0].isalnum():
+        return False
+    if end < len(source) and source[end].isdigit() and excerpt[-1].isdigit():
+        return False
+
+    leading = source[:start]
+    if (
+        start >= 2
+        and source[start - 1] in {"'", "-"}
+        and source[start - 2].isalnum()
+        and excerpt[0].isalnum()
+    ):
+        return False
+    if excerpt[0].isdigit() and re.search(
+        r"(?:[+\-\u2212]\s*|\d[.,])$",
+        leading,
+        flags=re.UNICODE,
+    ):
+        return False
+    if excerpt[0].isalpha() and _OMITTED_LEADING_QUALIFIER.search(leading):
+        return False
+
+    trailing = source[end:]
+    if (
+        end + 1 < len(source)
+        and source[end] in {"'", "-"}
+        and source[end + 1].isalnum()
+        and excerpt[-1].isalnum()
+    ):
+        return False
+    if excerpt[-1].isdigit() and _TRUNCATED_NUMERIC_SUFFIX.match(trailing):
+        return False
+    if _OMITTED_TRAILING_QUALIFIER.match(trailing):
+        return False
+
+    return True
+
+
+def _contains_evidence_excerpt(excerpt: str, source: str) -> bool:
+    """Return whether an exact contiguous match has safe evidence boundaries."""
+    if not excerpt:
+        return False
+
+    start = source.find(excerpt)
+    while start != -1:
+        end = start + len(excerpt)
+        if _has_safe_evidence_boundaries(source, start, end):
+            return True
+        start = source.find(excerpt, start + 1)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Internal grounded schemas (private)
 # ---------------------------------------------------------------------------
@@ -671,13 +786,17 @@ class ResearchMapService:
                     continue
 
                 # excerpt containment.
-                norm_excerpt = _normalize_text(ev.excerpt)
-                norm_source = _normalize_text(source_chunk.text)
-                if norm_excerpt not in norm_source:
+                evidence_excerpt = _normalize_evidence_text(ev.excerpt)
+                evidence_source = _normalize_evidence_text(source_chunk.text)
+                if not _contains_evidence_excerpt(
+                    evidence_excerpt,
+                    evidence_source,
+                ):
                     issues.add(_IssueCode.EXCERPT_NOT_FOUND)
                     continue
 
                 # exact duplicate evidence within this grounded statement.
+                norm_excerpt = _normalize_text(ev.excerpt)
                 ev_key = (ev.chunk_id, ev.page, norm_excerpt)
                 if ev_key in seen_evidence_keys:
                     issues.add(_IssueCode.DUPLICATE_EVIDENCE)

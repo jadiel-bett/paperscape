@@ -119,6 +119,38 @@ def _default_valid_response() -> str:
     )
 
 
+def _single_chunk_response(
+    *,
+    chunk_id: str,
+    page: int,
+    excerpt: str,
+) -> str:
+    """Return a valid internal map whose evidence all uses one excerpt."""
+    evidence = [{"chunk_id": chunk_id, "page": page, "excerpt": excerpt}]
+    return json.dumps(
+        {
+            "research_question": {
+                "statement": "What was studied?",
+                "evidence": evidence,
+            },
+            "findings": [
+                {
+                    "statement": f"Finding {index}.",
+                    "evidence": evidence,
+                    "confidence": "high",
+                }
+                for index in range(1, 4)
+            ],
+            "limitations": [
+                {
+                    "statement": "A limitation was reported.",
+                    "evidence": evidence,
+                }
+            ],
+        }
+    )
+
+
 def _make_service(
     responses: list[str] | None = None,
     **kwargs: Any,
@@ -687,6 +719,334 @@ class TestGrounding:
         result = service.generate_map(extraction)
         assert isinstance(result, ResearchMap)
         assert provider.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("source_text", "excerpt"),
+        [
+            pytest.param(
+                "The result\nwas\tstatistically   significant.",
+                "The result was statistically significant.",
+                id="whitespace-and-line-breaks",
+            ),
+            pytest.param(
+                "The Treatment Reduced Symptoms.",
+                "the treatment reduced symptoms.",
+                id="unicode-case-folding",
+            ),
+            pytest.param(
+                "The “patient’s” response was ‘stable’.",
+                'The "patient\'s" response was \'stable\'.',
+                id="curly-and-straight-quotes",
+            ),
+            pytest.param(
+                "The dose–response trend was stable.",
+                "The dose-response trend was stable.",
+                id="unicode-dash",
+            ),
+            pytest.param(
+                "The inter\u00adnational cohort was retained.",
+                "The international cohort was retained.",
+                id="soft-hyphen",
+            ),
+            pytest.param(
+                "The inter-\nnational cohort was retained.",
+                "The international cohort was retained.",
+                id="line-break-hyphenation",
+            ),
+            pytest.param(
+                "The inter- national cohort was retained.",
+                "The international cohort was retained.",
+                id="space-hyphenation",
+            ),
+        ],
+    )
+    def test_harmless_evidence_representation_variants_accepted(
+        self,
+        source_text: str,
+        excerpt: str,
+    ) -> None:
+        """Only bounded representation differences preserve containment."""
+        chunk = _make_chunk(
+            "evidence-chunk",
+            page=4,
+            section="Results",
+            text=source_text,
+        )
+        service, _ = _make_service()
+
+        _, issues = service._parse_and_validate(
+            _single_chunk_response(
+                chunk_id=chunk.chunk_id,
+                page=chunk.page,
+                excerpt=excerpt,
+            ),
+            [chunk],
+        )
+
+        assert issues == set()
+
+    @pytest.mark.parametrize(
+        ("source_text", "excerpt"),
+        [
+            pytest.param(
+                "The treatment reduced symptoms after 12 weeks.",
+                "Symptoms improved after 12 weeks.",
+                id="paraphrased-wording",
+            ),
+            pytest.param(
+                "The alpha beta gamma sequence was observed.",
+                "The alpha gamma beta sequence was observed.",
+                id="reordered-words",
+            ),
+            pytest.param(
+                "The sample included 120 participants.",
+                "The sample included 121 participants.",
+                id="changed-number",
+            ),
+            pytest.param(
+                "Symptoms decreased by 12%.",
+                "Symptoms decreased by 13%.",
+                id="changed-percentage",
+            ),
+            pytest.param(
+                "The administered dose was 5 mg.",
+                "The administered dose was 5 g.",
+                id="changed-unit",
+            ),
+            pytest.param(
+                "The effect was -5 points.",
+                "The effect was +5 points.",
+                id="changed-sign",
+            ),
+            pytest.param(
+                "The interval covered 95- 100% of observations.",
+                "The interval covered 95100% of observations.",
+                id="removed-numeric-range-sign",
+            ),
+            pytest.param(
+                "The confidence interval was 1.2 to 1.8.",
+                "The confidence interval was 1.3 to 1.8.",
+                id="changed-confidence-interval",
+            ),
+            pytest.param(
+                "The treatment may reduce symptoms.",
+                "The treatment reduce symptoms.",
+                id="missing-qualifier",
+            ),
+        ],
+    )
+    def test_semantic_or_numeric_evidence_changes_rejected(
+        self,
+        source_text: str,
+        excerpt: str,
+    ) -> None:
+        """Wording, order, quantities, units, signs, and qualifiers stay exact."""
+        chunk = _make_chunk(
+            "evidence-chunk",
+            page=4,
+            section="Results",
+            text=source_text,
+        )
+        service, _ = _make_service()
+
+        _, issues = service._parse_and_validate(
+            _single_chunk_response(
+                chunk_id=chunk.chunk_id,
+                page=chunk.page,
+                excerpt=excerpt,
+            ),
+            [chunk],
+        )
+
+        assert issues == {_IssueCode.EXCERPT_NOT_FOUND}
+
+    @pytest.mark.parametrize(
+        ("source_text", "excerpt"),
+        [
+            pytest.param(
+                "The effect was -5 points.",
+                "-5 points.",
+                id="complete-signed-value",
+            ),
+            pytest.param(
+                "The effect was \u22125 points.",
+                "\u22125 points.",
+                id="complete-unicode-minus-value",
+            ),
+            pytest.param(
+                "The administered dose was 5 mg.",
+                "5 mg.",
+                id="complete-value-and-unit",
+            ),
+            pytest.param(
+                "Symptoms decreased by 12%.",
+                "12%.",
+                id="complete-percentage",
+            ),
+            pytest.param(
+                "The confidence interval was 1.2 to 1.8.",
+                "1.2 to 1.8.",
+                id="complete-confidence-interval",
+            ),
+            pytest.param(
+                "The treatment may reduce symptoms.",
+                "may reduce symptoms.",
+                id="complete-qualified-claim",
+            ),
+        ],
+    )
+    def test_complete_semantic_evidence_passages_accepted(
+        self,
+        source_text: str,
+        excerpt: str,
+    ) -> None:
+        """Complete signed, measured, ranged, and qualified passages pass."""
+        chunk = _make_chunk(
+            "evidence-chunk",
+            page=4,
+            section="Results",
+            text=source_text,
+        )
+        service, _ = _make_service()
+
+        _, issues = service._parse_and_validate(
+            _single_chunk_response(
+                chunk_id=chunk.chunk_id,
+                page=chunk.page,
+                excerpt=excerpt,
+            ),
+            [chunk],
+        )
+
+        assert issues == set()
+
+    @pytest.mark.parametrize(
+        ("source_text", "excerpt"),
+        [
+            pytest.param(
+                "The sample included 120 participants.",
+                "12",
+                id="partial-number",
+            ),
+            pytest.param(
+                "The patient's response was stable.",
+                "patient",
+                id="partial-apostrophe-word",
+            ),
+            pytest.param(
+                "The dose-response trend was stable.",
+                "dose",
+                id="partial-hyphenated-word",
+            ),
+            pytest.param(
+                "The effect was -5 points.",
+                "5 points.",
+                id="omitted-sign",
+            ),
+            pytest.param(
+                "The effect was \u22125 points.",
+                "5 points.",
+                id="omitted-unicode-minus",
+            ),
+            pytest.param(
+                "The administered dose was 5 mg.",
+                "5",
+                id="omitted-unit",
+            ),
+            pytest.param(
+                "Symptoms decreased by 12%.",
+                "12",
+                id="omitted-percentage",
+            ),
+            pytest.param(
+                "The confidence interval was 1.2 to 1.8.",
+                "1.2",
+                id="truncated-confidence-interval",
+            ),
+            pytest.param(
+                "The treatment may reduce symptoms.",
+                "reduce symptoms.",
+                id="omitted-leading-qualifier",
+            ),
+            pytest.param(
+                "The treatment reduced symptoms, possibly.",
+                "The treatment reduced symptoms",
+                id="omitted-trailing-qualifier",
+            ),
+        ],
+    )
+    def test_truncated_evidence_boundaries_rejected(
+        self,
+        source_text: str,
+        excerpt: str,
+    ) -> None:
+        """Partial tokens and omitted semantic modifiers fail grounding."""
+        chunk = _make_chunk(
+            "evidence-chunk",
+            page=4,
+            section="Results",
+            text=source_text,
+        )
+        service, _ = _make_service()
+
+        _, issues = service._parse_and_validate(
+            _single_chunk_response(
+                chunk_id=chunk.chunk_id,
+                page=chunk.page,
+                excerpt=excerpt,
+            ),
+            [chunk],
+        )
+
+        assert issues == {_IssueCode.EXCERPT_NOT_FOUND}
+
+    def test_excerpt_from_different_chunk_rejected(self) -> None:
+        """An excerpt cannot be grounded through another selected chunk."""
+        referenced = _make_chunk(
+            "referenced-chunk",
+            page=2,
+            section="Results",
+            text="The referenced chunk reports one result.",
+        )
+        other = _make_chunk(
+            "other-chunk",
+            page=3,
+            section="Discussion",
+            text="The other chunk contains this distinct passage.",
+        )
+        service, _ = _make_service()
+
+        _, issues = service._parse_and_validate(
+            _single_chunk_response(
+                chunk_id=referenced.chunk_id,
+                page=referenced.page,
+                excerpt=other.text,
+            ),
+            [referenced, other],
+        )
+
+        assert issues == {_IssueCode.EXCERPT_NOT_FOUND}
+
+    def test_matching_excerpt_with_wrong_page_rejected(self) -> None:
+        """Correct excerpt text cannot override an incorrect evidence page."""
+        chunk = _make_chunk(
+            "evidence-chunk",
+            page=4,
+            section="Results",
+            text="The exact source passage.",
+        )
+        service, _ = _make_service()
+
+        _, issues = service._parse_and_validate(
+            _single_chunk_response(
+                chunk_id=chunk.chunk_id,
+                page=5,
+                excerpt=chunk.text,
+            ),
+            [chunk],
+        )
+
+        assert issues == {_IssueCode.PAGE_MISMATCH}
 
     def test_excerpt_longer_than_300_chars_rejected(self) -> None:
         """Excerpt exceeding 300 characters → Pydantic rejection."""
