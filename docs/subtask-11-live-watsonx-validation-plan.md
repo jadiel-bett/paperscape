@@ -1214,6 +1214,59 @@ runtime infrastructure
 
 unless a verified blocker receives a separately documented decision.
 
+## Tier B Paid-Run Decision
+
+**Decision date:** 2026-07-30  
+**Approved by:** Jadiel Bett  
+**Status:** Approved for one Tier B invocation
+
+### Decision
+
+Approve one manually initiated service-level ResearchMap validation using the
+real watsonx Chat provider and the existing synthetic extraction fixture.
+
+### Controls
+
+- Run only `test_live_research_map_service`.
+- Select it explicitly with `-k research_map_service`.
+- Use `ibm/granite-4-h-small`.
+- Use the Frankfurt `eu-de` endpoint.
+- Keep TLS certificate verification enabled.
+- Do not rerun after failure without review.
+- Do not print or persist generated model output.
+- Do not begin the browser workflow unless Tier B succeeds.
+- Do not run a three-paper evaluator.
+- Do not modify installed SDK files.
+
+### Known theoretical bound
+
+- `ResearchMapService` may make two provider calls through its one corrective
+  retry.
+- `WatsonxProvider` may make two Chat invocations for each provider call through
+  its transient retry.
+- The SDK may make up to four raw inference requests per Chat invocation.
+- Tier B therefore has a theoretical maximum of sixteen raw inference requests.
+- Authentication and provider-construction traffic is additional.
+- These are theoretical transport bounds and are not assumed to represent
+  billable inference calls.
+
+### Authorization boundary
+
+This approval authorizes exactly one Tier B invocation.
+
+It does not authorize:
+
+- Tier A reruns;
+- repeated Tier B attempts;
+- the three-paper evaluator;
+- the full browser workflow;
+- model or region switching;
+- prompt changes;
+- weakened validation.
+
+The approval is consumed when the Tier B command executes, whether it passes or
+fails.
+
 ## 15. Verification commands
 
 ### 15.1 Default offline gates
