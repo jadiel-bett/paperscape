@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     watsonx_url: str = "https://us-south.ml.cloud.ibm.com"
     # watsonx_project_id is a non-secret identifier — kept as plain str
     watsonx_project_id: str = ""
-    granite_model_id: str = "ibm/granite-13b-instruct-v2"
+    granite_model_id: str = "ibm/granite-4-h-small"
 
     # Upload
     upload_max_bytes: int = 20_971_520  # 20 MB

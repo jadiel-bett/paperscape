@@ -4276,3 +4276,44 @@ Result:
 This proved live compatibility of the pinned SDK, Frankfurt endpoint, project,
 candidate model, and PaperScape Chat provider path. The one-run approval was
 consumed. Tier B remained separately blocked.
+
+---
+
+## Sub-task 11 Stage 2 — Tier B preparation
+
+**Status:** Implemented and offline-verified; Tier B not executed
+
+This deadline-bounded stage:
+
+- promoted the application default to `ibm/granite-4-h-small`;
+- added the exact configuration assertion;
+- added the separately selectable
+  `test_live_research_map_service` Tier B harness;
+- used the real `ResearchMapService`, real `WatsonxProvider`, existing extraction
+  fixture, prompt, schema validation, grounding validation, and corrective retry;
+- counted public provider `generate` calls through an unchanged delegate;
+- recorded provider calls, corrective retries, and generation time without
+  printing prompts, output, credentials, raw responses, or exception bodies;
+- kept both live tests behind the existing two paid-test gates.
+
+Offline verification recorded:
+
+- config tests: 15 passed;
+- live-gate safety tests: 8 passed;
+- live module: 2 skipped;
+- provider tests: 94 passed;
+- ResearchMap tests: 67 passed;
+- integration tests: 2 passed;
+- backend collection: 456 tests;
+- complete backend suite: 454 passed, 2 skipped;
+- deterministic offline ResearchMap evaluation: passed;
+- `pip check`: passed;
+- Dart format: 23 files checked, 0 changed;
+- Flutter analysis: no issues;
+- Flutter tests: 42 passed;
+- Flutter Web release build: passed.
+
+Both live gates remained absent during verification. No live watsonx call
+occurred, no credential was inspected, and Tier B still requires a separate
+paid-run decision. No evaluator, Tier C automation, prompt, frontend source,
+Compose, database, or job-orchestration change was added.

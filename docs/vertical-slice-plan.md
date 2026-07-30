@@ -307,10 +307,10 @@ job reaches `succeeded` status.
 
 | Setting | Env var | Default / Notes |
 |---|---|---|
-| `watsonx_api_key` | `WATSONX_API_KEY` | Required, never logged |
-| `watsonx_url` | `WATSONX_URL` | e.g. `https://us-south.ml.cloud.ibm.com` |
-| `watsonx_project_id` | `WATSONX_PROJECT_ID` | Required |
-| `granite_model_id` | `GRANITE_MODEL_ID` | Default: `ibm/granite-13b-instruct-v2` |
+| `watsonx_api_key` | `WATSONX_API_KEY` | Backend-only; optional at startup, required for generation, never logged |
+| `watsonx_url` | `WATSONX_URL` | Default: `https://us-south.ml.cloud.ibm.com`; Frankfurt uses `https://eu-de.ml.cloud.ibm.com` |
+| `watsonx_project_id` | `WATSONX_PROJECT_ID` | Backend-only; optional at startup, required for generation |
+| `granite_model_id` | `GRANITE_MODEL_ID` | Default: `ibm/granite-4-h-small` |
 | `upload_max_bytes` | `UPLOAD_MAX_BYTES` | Default: `20971520` (20 MB) |
 | `cors_origins` | `CORS_ORIGINS` | Comma-separated list |
 | `database_url` | `DATABASE_URL` | Default: `sqlite:///./paperscape.db` |
@@ -544,7 +544,8 @@ procedure.
 - All service-layer tests use dependency injection; no env vars or live network.
 - `JobStore` tests use `sqlite3` in-memory (`:memory:`) — no file on disk.
 - API tests use `TestClient` with FastAPI dependency overrides.
-- Live watsonx calls gated behind `WATSONX_LIVE_TEST=1`; never run in default CI.
+- Live watsonx calls require both `WATSONX_LIVE_TEST=1` and
+  `WATSONX_LIVE_ACK_CHARGES=1`; they remain skipped during ordinary pytest.
 - Background task execution in API tests is run synchronously by calling the
   task function directly after the response, not through the real async runner.
 

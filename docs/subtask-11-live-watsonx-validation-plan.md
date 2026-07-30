@@ -100,7 +100,9 @@ Sub-task 11A therefore migrated the provider internally to
 `ModelInference.chat` while preserving `LLMProvider.generate(...) -> str`. The
 exact existing prompt is sent as one user message, `max_tokens` maps to
 `max_completion_tokens`, temperature is passed exactly, and assistant content
-is strictly validated. The application model default remains unchanged.
+is strictly validated. At migration time the application model default remained
+unchanged; after the migrated Tier A pass, Stage 2 promoted the compatible
+Granite 4 model.
 
 Offline verification after the migration collected 454 backend tests: 453
 passed and the gated Tier A test was the only skip. Provider tests (94),
@@ -117,7 +119,7 @@ Direct backend configuration uses:
 | `WATSONX_API_KEY` | Empty by default; a non-empty value enables job creation. |
 | `WATSONX_PROJECT_ID` | Empty by default; required for successful project-scoped inference. |
 | `WATSONX_URL` | The application currently defaults to `https://us-south.ml.cloud.ibm.com`; Frankfurt live validation must explicitly override it with `https://eu-de.ml.cloud.ibm.com`. |
-| `GRANITE_MODEL_ID` | Defaults to `ibm/granite-13b-instruct-v2`. |
+| `GRANITE_MODEL_ID` | Defaults to `ibm/granite-4-h-small`. |
 
 Compose reads backend-only credentials from:
 
@@ -131,6 +133,12 @@ and maps them into the backend container as:
 
 Compose forwards `WATSONX_URL` and currently relies on the application's model
 default. No watsonx setting is exposed to Flutter.
+
+Watsonx credentials remain backend-only. Missing credentials are supported
+during ordinary startup, health checks, upload, and extraction; generation
+remains unavailable until they are configured. Frankfurt live validation uses
+`https://eu-de.ml.cloud.ibm.com`. Live tests remain skipped unless both
+`WATSONX_LIVE_TEST=1` and `WATSONX_LIVE_ACK_CHARGES=1` are explicitly supplied.
 
 ### 2.3 IBM model and API lifecycle facts
 
@@ -621,10 +629,8 @@ approval after its implementation and audit.
 Purpose: prove that the current provider path can invoke the explicitly selected
 candidate without modifying application data.
 
-Creating a Tier A-only harness and implementing the Chat migration do not
-authorize another paid execution. Tier A remains blocked until the migrated
-Chat path is audited, offline gates pass, and a new Decision B in Section 6 is
-explicitly approved.
+The migrated Chat Tier A passed once on 30 July 2026. Its paid-run approval was
+consumed, and any rerun requires a separate explicit approval.
 
 Required behavior:
 
@@ -1181,6 +1187,12 @@ documentation. The provider documentation correction and Chat migration were
 completed separately in Sub-task 11A. Run all offline regressions after Stage 2
 changes and before executing Tier B.
 
+The deadline-bounded Stage 2 implementation promotes the default and adds only
+`test_live_research_map_service`. The Tier B harness is implemented but has not
+been executed. It requires a separate paid-run decision. The three-paper
+evaluator remains deferred and is not part of this bounded change. Successful
+Tier B remains a prerequisite for the real Compose/browser workflow.
+
 Sub-task 11A must also fix stale wording in `docs/vertical-slice-plan.md` that
 said:
 
@@ -1359,14 +1371,14 @@ Do not use `docker compose down -v` during validation.
 
 | Risk | Mitigation |
 |---|---|
-| Current default is withdrawn | Use only an explicit Granite 4 override for Tier A; promote the default after success. |
+| A withdrawn model is used accidentally | The application default was promoted to `ibm/granite-4-h-small` only after migrated Tier A succeeded. |
 | Candidate model lacks migrated Chat compatibility | Stop and require a new provider decision. |
 | Candidate model is unavailable to the project | Confirm Resource Hub/Prompt Lab access, then stop on Tier A failure. |
 | Frankfurt project, Runtime, and endpoint regions differ | Create both the project and Lite Runtime in Frankfurt and use `https://eu-de.ml.cloud.ibm.com`; do not infer region from UUID. |
 | A Frankfurt call fails | Classify and verify whether the blocker is Frankfurt-specific; do not automatically switch regions. Dallas requires a separate, evidence-backed fallback decision. |
 | Kenya latency is assumed rather than measured | Record actual construction, inference, and workflow latency from Kenya during the approved live validation. |
 | SDK performs construction requests | Pinned source confirms authentication during construction; gate every import/construction path and instrument authentication separately where approved. |
-| Hidden SDK transport retries increase requests | Four retry-loop iterations can produce four raw inference requests per Chat invocation; Tier A and Tier B conservative bounds are eight and sixteen respectively, excluding authentication/construction requests. Another Tier A remains blocked pending audit, offline gates, and a new cost decision. |
+| Hidden SDK transport retries increase requests | Four retry-loop iterations can produce four raw inference requests per Chat invocation; Tier A and Tier B conservative bounds are eight and sixteen respectively, excluding authentication/construction requests. Any further paid run requires a separate decision. |
 | Cost bounding weakens TLS security | Credentials explicitly use `verify=True`; never use `verify=False`, suppress certificate errors, patch site-packages, silently replace transport, or reduce security controls. |
 | JSON or grounding fails | Allow the existing single corrective call; do not weaken validation. |
 | One paper drives prompt overfitting | Classify failures first and require multi-paper evidence before prompt work. |
@@ -1494,28 +1506,31 @@ Sub-task 11 is complete only when:
 ## 21. Final status
 
 1. The offline eval-baseline requirement is already satisfied.
-2. A successful real watsonx run remains a vertical-slice gap.
-3. Real watsonx compatibility remains unproven.
-4. Provider construction performs network authentication in the pinned SDK.
-5. The migrated provider explicitly enables certificate verification, disabling
-   the pinned SDK's unverified SSL fallback.
-6. Sub-task 11A replaces the deprecated production text-generation request with
-   `ModelInference.chat` while preserving the public provider interface.
-7. Another paid Tier A requires migration audit, passing offline gates, and a
-   new explicit Chat-path retry, authentication, attempt-accounting, and
-   cost-control decision.
-8. The current conservative theoretical bounds are eight raw inference
-   transport requests for Tier A and sixteen for Tier B, excluding
-   authentication and provider-construction requests.
-9. TLS certificate verification may not be weakened.
-10. Frankfurt (`eu-de`) is selected with
-    `https://eu-de.ml.cloud.ibm.com`; the PaperScape project and associated
-    Lite-plan Runtime must both be created there.
-11. Credential readiness, project entitlement, candidate-model access, and Chat
-    compatibility remain live prerequisites.
-12. Actual latency from Kenya must be measured rather than assumed.
-13. Dallas is a fallback only for a verified Frankfurt-specific compatibility
-    blocker, and a failed call must never switch regions automatically.
-14. The withdrawn current model default must not be used for live validation.
-15. Audience adaptation begins only after Tier A, Tier B, Tier C, and the
-    three-paper scorecard succeed.
+2. Migrated Chat Tier A passed once in Frankfurt with
+   `ibm/granite-4-h-small`; its approval is consumed.
+3. The application now defaults to `ibm/granite-4-h-small`.
+4. The separately gated Tier B harness is implemented but has not been
+   executed.
+5. Tier B requires a separate paid-run decision, and a successful Tier B remains
+   a prerequisite for the real Compose/browser workflow.
+6. Provider construction performs network authentication in the pinned SDK.
+7. The migrated provider explicitly enables certificate verification, disabling
+    the pinned SDK's unverified SSL fallback.
+8. Sub-task 11A replaces the deprecated production text-generation request with
+    `ModelInference.chat` while preserving the public provider interface.
+9. Any further paid live run requires a separate explicit retry,
+   authentication, attempt-accounting, and cost-control decision.
+10. The current conservative theoretical bounds are eight raw inference
+    transport requests for Tier A and sixteen for Tier B, excluding
+    authentication and provider-construction requests.
+11. TLS certificate verification may not be weakened.
+12. Frankfurt (`eu-de`) is selected with
+     `https://eu-de.ml.cloud.ibm.com`; the PaperScape project and associated
+     Lite-plan Runtime must both be created there.
+13. Credential readiness, project entitlement, candidate-model access, and Chat
+     compatibility remain live prerequisites.
+14. Actual latency from Kenya must be measured rather than assumed.
+15. Dallas is a fallback only for a verified Frankfurt-specific compatibility
+     blocker, and a failed call must never switch regions automatically.
+16. Audience adaptation begins only after Tier A, Tier B, Tier C, and the
+     three-paper scorecard succeed.
