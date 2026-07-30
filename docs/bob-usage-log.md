@@ -4378,3 +4378,21 @@ parts of numbers or apostrophe/hyphen-joined words. Deterministic
 evidence-boundary checks were added to reject those truncations while preserving
 exact normalized substring matching and established long-excerpt behavior. No
 fuzzy or semantic similarity was introduced, and no paid rerun occurred.
+
+### Deterministic evidence-span preparation
+
+Conservative normalization did not resolve the real `EXCERPT_NOT_FOUND`
+result, and the corrective attempt again returned `INVALID_SCHEMA`. The backend
+now segments the already-selected chunks into deterministic exact source spans
+of at most 300 characters, assigns stable document-order IDs
+(`E0001`, `E0002`, ...), and asks the model to return only those IDs. Valid IDs
+are resolved by the backend into the existing public `chunk_id`, `page`, and
+`excerpt` fields, so model-authored excerpts can no longer cause
+`EXCERPT_NOT_FOUND`.
+
+Unknown or case-mismatched IDs produce only the safe
+`UNKNOWN_EVIDENCE_ID` diagnostic, and the corrective prompt lists valid evidence
+IDs only. The superseded evidence-normalization and boundary-matching code was
+removed; no fuzzy or semantic matching was added. Provider behavior, model
+configuration, retry count, public schemas, API behavior, and job orchestration
+were not changed. No live or paid rerun occurred during implementation.

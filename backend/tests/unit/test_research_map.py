@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import unicodedata
 from typing import Any
 
 import pytest
@@ -20,12 +19,16 @@ from app.models.research_map import ResearchMap
 from app.services.llm_provider import LLMProvider, LLMProviderError
 from app.services.research_map import (
     _CONTEXT_SENTINEL,
+    _MAX_EVIDENCE_SPAN_CHARS,
+    _EvidenceSpan,
+    _build_evidence_catalogue,
     _normalize_text,
+    _split_evidence_text,
     _section_priority,
     _is_excluded_section,
     _head_and_tail_sort,
     _IssueCode,
-    _InternalEvidence,
+    _InternalEvidenceReference,
     _InternalFinding,
     _InternalGroundedStatement,
     _InternalResearchMap,
@@ -90,43 +93,38 @@ def _default_valid_response() -> str:
         {
             "research_question": {
                 "statement": "What is the research question?",
-                "evidence": [{"chunk_id": "test-paper-id-p1-1", "page": 1, "excerpt": "Abstract content."}],
+                "evidence": [{"evidence_id": "E0001"}],
             },
             "findings": [
                 {
                     "statement": "Finding one.",
-                    "evidence": [{"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."}],
+                    "evidence": [{"evidence_id": "E0002"}],
                     "confidence": "high",
                 },
                 {
                     "statement": "Finding two.",
-                    "evidence": [{"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."}],
+                    "evidence": [{"evidence_id": "E0002"}],
                     "confidence": "partial",
                 },
                 {
                     "statement": "Finding three.",
-                    "evidence": [{"chunk_id": "test-paper-id-p4-1", "page": 4, "excerpt": "Discussion of findings."}],
+                    "evidence": [{"evidence_id": "E0003"}],
                     "confidence": "high",
                 },
             ],
             "limitations": [
                 {
                     "statement": "A limitation.",
-                    "evidence": [{"chunk_id": "test-paper-id-p4-1", "page": 4, "excerpt": "Discussion of findings."}],
+                    "evidence": [{"evidence_id": "E0003"}],
                 }
             ],
         }
     )
 
 
-def _single_chunk_response(
-    *,
-    chunk_id: str,
-    page: int,
-    excerpt: str,
-) -> str:
-    """Return a valid internal map whose evidence all uses one excerpt."""
-    evidence = [{"chunk_id": chunk_id, "page": page, "excerpt": excerpt}]
+def _single_evidence_response(evidence_id: str = "E0001") -> str:
+    """Return a valid internal map whose statements use one evidence ID."""
+    evidence = [{"evidence_id": evidence_id}]
     return json.dumps(
         {
             "research_question": {
@@ -236,7 +234,7 @@ class TestPromptConstruction:
         provider = FakeLLMProvider([_default_valid_response()])
         service = ResearchMapService(provider=provider)
         selected = service._select_chunks(extraction)
-        prompt = service._build_prompt(selected)
+        prompt = service._build_prompt(_build_evidence_catalogue(selected))
 
         # The dangerous text should appear in the prompt as valid JSON.
         # json.dumps escapes quotes etc.
@@ -618,442 +616,41 @@ class TestParsing:
 
 class TestGrounding:
     def test_valid_evidence_succeeds(self) -> None:
-        """Evidence referencing valid selected chunks passes."""
+        """Valid evidence IDs resolve to unchanged public Evidence objects."""
         service, provider = _make_service()
         extraction = _make_extraction()
         result = service.generate_map(extraction)
         assert isinstance(result, ResearchMap)
-        # All findings have evidence.
-        for f in result.findings:
-            assert len(f.evidence) >= 1
-
-    def test_unknown_chunk_id_rejected(self) -> None:
-        """Evidence referencing non-existent chunk ID → corrective retry."""
-        invalid = json.loads(_default_valid_response())
-        invalid["findings"][0]["evidence"][0]["chunk_id"] = "nonexistent-chunk"
-        bad = json.dumps(invalid)
-        good = _default_valid_response()
-        service, provider = _make_service(responses=[bad, good])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
-        assert provider.call_count == 2
-
-    def test_page_mismatch_rejected(self) -> None:
-        """Evidence page number differs from chunk page → corrective retry."""
-        invalid = json.loads(_default_valid_response())
-        invalid["findings"][0]["evidence"][0]["page"] = 99
-        bad = json.dumps(invalid)
-        good = _default_valid_response()
-        service, provider = _make_service(responses=[bad, good])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
-        assert provider.call_count == 2
-
-    def test_excerpt_not_in_source_rejected(self) -> None:
-        """Excerpt not found in source chunk text → corrective retry."""
-        invalid = json.loads(_default_valid_response())
-        invalid["findings"][0]["evidence"][0]["excerpt"] = "This text does not appear anywhere."
-        bad = json.dumps(invalid)
-        good = _default_valid_response()
-        service, provider = _make_service(responses=[bad, good])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
-        assert provider.call_count == 2
-
-    def test_excerpt_containment_after_normalization(self) -> None:
-        """Whitespace-normalized excerpt matches normalized source."""
-        # Source: "Results content showing data."
-        # Excerpt: "Results  content   showing data." (extra spaces)
-        invalid = json.loads(_default_valid_response())
-        invalid["findings"][1]["evidence"][0]["excerpt"] = "Results  content   showing data."
-        bad = json.dumps(invalid)
-        # This should pass because normalization collapses whitespace.
-        service, provider = _make_service(responses=[bad])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
         assert provider.call_count == 1
+        assert result.findings[0].evidence[0].model_dump() == {
+            "chunk_id": "test-paper-id-p3-1",
+            "page": 3,
+            "excerpt": "Results content showing data.",
+        }
 
-    def test_unicode_normalized_excerpt_succeeds(self) -> None:
-        """NFKC normalization enables matching with composed/decomposed unicode."""
-        # Use an excerpt with a composed character (e.g., é = U+00E9).
-        # The source uses the same composed form.
-        source_text = "Résultats content showing data."
-        chunks = [
-            _make_chunk("test-pid-p3-1", page=3, section="Results", text=source_text),
-        ]
-        extraction = _make_extraction(chunks=chunks)
-        response = json.dumps({
-            "research_question": {
-                "statement": "Question?",
-                "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-            },
-            "findings": [
-                {
-                    "statement": "Finding one.",
-                    "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-                    "confidence": "high",
-                },
-                {
-                    "statement": "Finding two.",
-                    "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-                    "confidence": "high",
-                },
-                {
-                    "statement": "Finding three.",
-                    "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-                    "confidence": "high",
-                },
-            ],
-            "limitations": [
-                {
-                    "statement": "Limitation.",
-                    "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-                }
-            ],
-        })
-        service, provider = _make_service(responses=[response])
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
-        assert provider.call_count == 1
-
-    @pytest.mark.parametrize(
-        ("source_text", "excerpt"),
-        [
-            pytest.param(
-                "The result\nwas\tstatistically   significant.",
-                "The result was statistically significant.",
-                id="whitespace-and-line-breaks",
-            ),
-            pytest.param(
-                "The Treatment Reduced Symptoms.",
-                "the treatment reduced symptoms.",
-                id="unicode-case-folding",
-            ),
-            pytest.param(
-                "The “patient’s” response was ‘stable’.",
-                'The "patient\'s" response was \'stable\'.',
-                id="curly-and-straight-quotes",
-            ),
-            pytest.param(
-                "The dose–response trend was stable.",
-                "The dose-response trend was stable.",
-                id="unicode-dash",
-            ),
-            pytest.param(
-                "The inter\u00adnational cohort was retained.",
-                "The international cohort was retained.",
-                id="soft-hyphen",
-            ),
-            pytest.param(
-                "The inter-\nnational cohort was retained.",
-                "The international cohort was retained.",
-                id="line-break-hyphenation",
-            ),
-            pytest.param(
-                "The inter- national cohort was retained.",
-                "The international cohort was retained.",
-                id="space-hyphenation",
-            ),
-        ],
-    )
-    def test_harmless_evidence_representation_variants_accepted(
+    @pytest.mark.parametrize("invalid_id", ["E9999", "e0002", " E0002 "])
+    def test_unknown_or_case_changed_evidence_id_rejected(
         self,
-        source_text: str,
-        excerpt: str,
+        invalid_id: str,
     ) -> None:
-        """Only bounded representation differences preserve containment."""
-        chunk = _make_chunk(
-            "evidence-chunk",
-            page=4,
-            section="Results",
-            text=source_text,
-        )
-        service, _ = _make_service()
-
-        _, issues = service._parse_and_validate(
-            _single_chunk_response(
-                chunk_id=chunk.chunk_id,
-                page=chunk.page,
-                excerpt=excerpt,
-            ),
-            [chunk],
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["evidence"][0]["evidence_id"] = invalid_id
+        service, provider = _make_service(
+            responses=[json.dumps(invalid), _default_valid_response()]
         )
 
-        assert issues == set()
+        assert isinstance(service.generate_map(_make_extraction()), ResearchMap)
+        assert provider.call_count == 2
 
-    @pytest.mark.parametrize(
-        ("source_text", "excerpt"),
-        [
-            pytest.param(
-                "The treatment reduced symptoms after 12 weeks.",
-                "Symptoms improved after 12 weeks.",
-                id="paraphrased-wording",
-            ),
-            pytest.param(
-                "The alpha beta gamma sequence was observed.",
-                "The alpha gamma beta sequence was observed.",
-                id="reordered-words",
-            ),
-            pytest.param(
-                "The sample included 120 participants.",
-                "The sample included 121 participants.",
-                id="changed-number",
-            ),
-            pytest.param(
-                "Symptoms decreased by 12%.",
-                "Symptoms decreased by 13%.",
-                id="changed-percentage",
-            ),
-            pytest.param(
-                "The administered dose was 5 mg.",
-                "The administered dose was 5 g.",
-                id="changed-unit",
-            ),
-            pytest.param(
-                "The effect was -5 points.",
-                "The effect was +5 points.",
-                id="changed-sign",
-            ),
-            pytest.param(
-                "The interval covered 95- 100% of observations.",
-                "The interval covered 95100% of observations.",
-                id="removed-numeric-range-sign",
-            ),
-            pytest.param(
-                "The confidence interval was 1.2 to 1.8.",
-                "The confidence interval was 1.3 to 1.8.",
-                id="changed-confidence-interval",
-            ),
-            pytest.param(
-                "The treatment may reduce symptoms.",
-                "The treatment reduce symptoms.",
-                id="missing-qualifier",
-            ),
-        ],
-    )
-    def test_semantic_or_numeric_evidence_changes_rejected(
-        self,
-        source_text: str,
-        excerpt: str,
-    ) -> None:
-        """Wording, order, quantities, units, signs, and qualifiers stay exact."""
-        chunk = _make_chunk(
-            "evidence-chunk",
-            page=4,
-            section="Results",
-            text=source_text,
-        )
-        service, _ = _make_service()
-
-        _, issues = service._parse_and_validate(
-            _single_chunk_response(
-                chunk_id=chunk.chunk_id,
-                page=chunk.page,
-                excerpt=excerpt,
-            ),
-            [chunk],
-        )
-
-        assert issues == {_IssueCode.EXCERPT_NOT_FOUND}
-
-    @pytest.mark.parametrize(
-        ("source_text", "excerpt"),
-        [
-            pytest.param(
-                "The effect was -5 points.",
-                "-5 points.",
-                id="complete-signed-value",
-            ),
-            pytest.param(
-                "The effect was \u22125 points.",
-                "\u22125 points.",
-                id="complete-unicode-minus-value",
-            ),
-            pytest.param(
-                "The administered dose was 5 mg.",
-                "5 mg.",
-                id="complete-value-and-unit",
-            ),
-            pytest.param(
-                "Symptoms decreased by 12%.",
-                "12%.",
-                id="complete-percentage",
-            ),
-            pytest.param(
-                "The confidence interval was 1.2 to 1.8.",
-                "1.2 to 1.8.",
-                id="complete-confidence-interval",
-            ),
-            pytest.param(
-                "The treatment may reduce symptoms.",
-                "may reduce symptoms.",
-                id="complete-qualified-claim",
-            ),
-        ],
-    )
-    def test_complete_semantic_evidence_passages_accepted(
-        self,
-        source_text: str,
-        excerpt: str,
-    ) -> None:
-        """Complete signed, measured, ranged, and qualified passages pass."""
-        chunk = _make_chunk(
-            "evidence-chunk",
-            page=4,
-            section="Results",
-            text=source_text,
-        )
-        service, _ = _make_service()
-
-        _, issues = service._parse_and_validate(
-            _single_chunk_response(
-                chunk_id=chunk.chunk_id,
-                page=chunk.page,
-                excerpt=excerpt,
-            ),
-            [chunk],
-        )
-
-        assert issues == set()
-
-    @pytest.mark.parametrize(
-        ("source_text", "excerpt"),
-        [
-            pytest.param(
-                "The sample included 120 participants.",
-                "12",
-                id="partial-number",
-            ),
-            pytest.param(
-                "The patient's response was stable.",
-                "patient",
-                id="partial-apostrophe-word",
-            ),
-            pytest.param(
-                "The dose-response trend was stable.",
-                "dose",
-                id="partial-hyphenated-word",
-            ),
-            pytest.param(
-                "The effect was -5 points.",
-                "5 points.",
-                id="omitted-sign",
-            ),
-            pytest.param(
-                "The effect was \u22125 points.",
-                "5 points.",
-                id="omitted-unicode-minus",
-            ),
-            pytest.param(
-                "The administered dose was 5 mg.",
-                "5",
-                id="omitted-unit",
-            ),
-            pytest.param(
-                "Symptoms decreased by 12%.",
-                "12",
-                id="omitted-percentage",
-            ),
-            pytest.param(
-                "The confidence interval was 1.2 to 1.8.",
-                "1.2",
-                id="truncated-confidence-interval",
-            ),
-            pytest.param(
-                "The treatment may reduce symptoms.",
-                "reduce symptoms.",
-                id="omitted-leading-qualifier",
-            ),
-            pytest.param(
-                "The treatment reduced symptoms, possibly.",
-                "The treatment reduced symptoms",
-                id="omitted-trailing-qualifier",
-            ),
-        ],
-    )
-    def test_truncated_evidence_boundaries_rejected(
-        self,
-        source_text: str,
-        excerpt: str,
-    ) -> None:
-        """Partial tokens and omitted semantic modifiers fail grounding."""
-        chunk = _make_chunk(
-            "evidence-chunk",
-            page=4,
-            section="Results",
-            text=source_text,
-        )
-        service, _ = _make_service()
-
-        _, issues = service._parse_and_validate(
-            _single_chunk_response(
-                chunk_id=chunk.chunk_id,
-                page=chunk.page,
-                excerpt=excerpt,
-            ),
-            [chunk],
-        )
-
-        assert issues == {_IssueCode.EXCERPT_NOT_FOUND}
-
-    def test_excerpt_from_different_chunk_rejected(self) -> None:
-        """An excerpt cannot be grounded through another selected chunk."""
-        referenced = _make_chunk(
-            "referenced-chunk",
-            page=2,
-            section="Results",
-            text="The referenced chunk reports one result.",
-        )
-        other = _make_chunk(
-            "other-chunk",
-            page=3,
-            section="Discussion",
-            text="The other chunk contains this distinct passage.",
-        )
-        service, _ = _make_service()
-
-        _, issues = service._parse_and_validate(
-            _single_chunk_response(
-                chunk_id=referenced.chunk_id,
-                page=referenced.page,
-                excerpt=other.text,
-            ),
-            [referenced, other],
-        )
-
-        assert issues == {_IssueCode.EXCERPT_NOT_FOUND}
-
-    def test_matching_excerpt_with_wrong_page_rejected(self) -> None:
-        """Correct excerpt text cannot override an incorrect evidence page."""
-        chunk = _make_chunk(
-            "evidence-chunk",
-            page=4,
-            section="Results",
-            text="The exact source passage.",
-        )
-        service, _ = _make_service()
-
-        _, issues = service._parse_and_validate(
-            _single_chunk_response(
-                chunk_id=chunk.chunk_id,
-                page=5,
-                excerpt=chunk.text,
-            ),
-            [chunk],
-        )
-
-        assert issues == {_IssueCode.PAGE_MISMATCH}
-
-    def test_excerpt_longer_than_300_chars_rejected(self) -> None:
-        """Excerpt exceeding 300 characters → Pydantic rejection."""
-        long_excerpt = "A" * 301
-        ev = {"chunk_id": "c1", "page": 1, "excerpt": long_excerpt}
+    def test_model_cannot_supply_public_evidence_fields(self) -> None:
+        ev = {
+            "evidence_id": "E0001",
+            "chunk_id": "controlled",
+            "page": 99,
+            "excerpt": "controlled",
+        }
         with pytest.raises(ValidationError):
-            _InternalEvidence.model_validate(ev)
+            _InternalEvidenceReference.model_validate(ev)
 
     def test_finding_without_evidence_rejected(self) -> None:
         """Finding with empty evidence → Pydantic rejection."""
@@ -1101,44 +698,19 @@ class TestGrounding:
         assert isinstance(result, ResearchMap)
         assert provider.call_count == 2
 
-    def test_different_excerpts_same_chunk_accepted(self) -> None:
-        """Two different excerpts from the same chunk are not duplicates."""
-        response = json.dumps({
-            "research_question": {
-                "statement": "What?",
-                "evidence": [{"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."}],
-            },
-            "findings": [
-                {
-                    "statement": "Finding one.",
-                    "evidence": [
-                        {"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."},
-                        {"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "content showing"},
-                    ],
-                    "confidence": "high",
-                },
-                {
-                    "statement": "Finding two.",
-                    "evidence": [{"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."}],
-                    "confidence": "partial",
-                },
-                {
-                    "statement": "Finding three.",
-                    "evidence": [{"chunk_id": "test-paper-id-p4-1", "page": 4, "excerpt": "Discussion of findings."}],
-                    "confidence": "high",
-                },
-            ],
-            "limitations": [
-                {
-                    "statement": "Lim.",
-                    "evidence": [{"chunk_id": "test-paper-id-p4-1", "page": 4, "excerpt": "Discussion of findings."}],
-                }
-            ],
-        })
-        service, provider = _make_service(responses=[response])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
+    def test_different_evidence_ids_from_same_chunk_are_not_duplicates(self) -> None:
+        text = ("First exact sentence. " * 18) + ("Second exact sentence. " * 18)
+        extraction = _make_extraction(
+            chunks=[_make_chunk("long", page=7, section="Results", text=text)]
+        )
+        response = json.loads(_single_evidence_response())
+        response["findings"][0]["evidence"] = [
+            {"evidence_id": "E0001"},
+            {"evidence_id": "E0002"},
+        ]
+        service, provider = _make_service(responses=[json.dumps(response)])
+
+        assert isinstance(service.generate_map(extraction), ResearchMap)
         assert provider.call_count == 1
 
     def test_exactly_three_findings_required(self) -> None:
@@ -1172,6 +744,98 @@ class TestGrounding:
         # Already NFKC, just verify it runs.
         result = _normalize_text("Normal text")
         assert result == "Normal text"
+
+
+class TestEvidenceCatalogue:
+    def test_short_trimmed_chunk_is_one_exact_span(self) -> None:
+        chunk = _make_chunk(
+            "chunk-a", page=2, section="Results", text="  Exact source text.  "
+        )
+
+        catalogue = _build_evidence_catalogue([chunk])
+
+        assert catalogue == [
+            _EvidenceSpan(
+                evidence_id="E0001",
+                chunk_id="chunk-a",
+                page=2,
+                section="Results",
+                text="Exact source text.",
+            )
+        ]
+        assert catalogue[0].text in chunk.text
+
+    def test_long_chunks_split_deterministically_with_stable_ids(self) -> None:
+        chunks = [
+            _make_chunk(
+                "chunk-a",
+                page=1,
+                section="Abstract",
+                text=("A sentence ends here. " * 30),
+            ),
+            _make_chunk("chunk-b", page=2, section=None, text="Final chunk."),
+        ]
+
+        first = _build_evidence_catalogue(chunks)
+        second = _build_evidence_catalogue(chunks)
+
+        assert first == second
+        assert [span.evidence_id for span in first] == [
+            f"E{index:04d}" for index in range(1, len(first) + 1)
+        ]
+        assert first[-1].chunk_id == "chunk-b"
+        for span in first:
+            source = next(c.text for c in chunks if c.chunk_id == span.chunk_id)
+            assert 0 < len(span.text) <= _MAX_EVIDENCE_SPAN_CHARS
+            assert span.text in source
+
+    def test_split_prefers_paragraph_sentence_whitespace_then_hard_limit(
+        self,
+    ) -> None:
+        paragraph_text = ("a" * 140) + "\n\n" + ("b" * 200)
+        sentence_text = ("a" * 140) + ". " + ("b" * 200)
+        whitespace_text = ("a" * 140) + " " + ("b" * 200)
+        hard_text = "x" * 620
+
+        assert _split_evidence_text(paragraph_text)[0] == "a" * 140
+        assert _split_evidence_text(sentence_text)[0] == ("a" * 140) + "."
+        assert _split_evidence_text(whitespace_text)[0] == "a" * 140
+        assert len(_split_evidence_text(hard_text)[0]) == 300
+
+    def test_spans_preserve_numerics_qualifiers_and_unicode_exactly(self) -> None:
+        text = (
+            "The effect may be −5.2–7.4 mg at 95% confidence for café "
+            "participants; it was not necessarily causal."
+        )
+        chunk = _make_chunk("numeric-unicode", page=4, text=text)
+
+        catalogue = _build_evidence_catalogue([chunk])
+
+        assert [span.text for span in catalogue] == [text]
+
+    def test_prompt_catalogue_contains_ids_and_private_contract(self) -> None:
+        service, provider = _make_service()
+
+        service.generate_map(_make_extraction())
+        prompt = provider.captured_prompts[0]
+
+        assert '"evidence_id": "E0001"' in prompt
+        assert '"evidence_id": "E0002"' in prompt
+        assert '"evidence_id": "E0003"' in prompt
+        assert "Do NOT return chunk_id, page, section, text, or excerpt" in prompt
+
+    def test_corrective_prompt_lists_only_valid_evidence_ids(self) -> None:
+        service, provider = _make_service(
+            responses=["{invalid json}", _default_valid_response()]
+        )
+
+        service.generate_map(_make_extraction())
+        correction = provider.captured_prompts[1].split("CORRECTION REQUIRED", 1)[1]
+
+        assert '["E0001", "E0002", "E0003"]' in correction
+        assert "test-paper-id" not in correction
+        assert '"page"' not in correction
+        assert '"text"' not in correction
 
 
 # ===================================================================
@@ -1337,9 +1001,7 @@ class TestIssueCodes:
         assert _IssueCode.INVALID_JSON == "INVALID_JSON"
         assert _IssueCode.INVALID_SCHEMA == "INVALID_SCHEMA"
         assert _IssueCode.WRONG_FINDING_COUNT == "WRONG_FINDING_COUNT"
-        assert _IssueCode.UNKNOWN_CHUNK_ID == "UNKNOWN_CHUNK_ID"
-        assert _IssueCode.PAGE_MISMATCH == "PAGE_MISMATCH"
-        assert _IssueCode.EXCERPT_NOT_FOUND == "EXCERPT_NOT_FOUND"
+        assert _IssueCode.UNKNOWN_EVIDENCE_ID == "UNKNOWN_EVIDENCE_ID"
         assert _IssueCode.DUPLICATE_FINDING == "DUPLICATE_FINDING"
         assert _IssueCode.DUPLICATE_EVIDENCE == "DUPLICATE_EVIDENCE"
         assert _IssueCode.MISSING_LIMITATION == "MISSING_LIMITATION"
@@ -1420,10 +1082,10 @@ class TestIssueCodes:
     ) -> None:
         """Grounding issues returned on attempt two survive on the final error."""
         invalid = json.loads(_default_valid_response())
-        invalid["findings"][0]["evidence"][0]["page"] = 99
-        invalid["findings"][1]["evidence"][0]["excerpt"] = (
-            "SENTINEL_MODEL_OUTPUT_EXCERPT"
+        invalid["findings"][0]["evidence"][0]["evidence_id"] = (
+            "SENTINEL_MODEL_OUTPUT_ID"
         )
+        invalid["findings"][1]["statement"] = "Finding one."
         service, provider = _make_service(
             responses=["{invalid json}", json.dumps(invalid)]
         )
@@ -1434,14 +1096,14 @@ class TestIssueCodes:
 
         assert provider.call_count == 2
         assert excinfo.value.issue_codes == frozenset(
-            {_IssueCode.EXCERPT_NOT_FOUND, _IssueCode.PAGE_MISMATCH}
+            {_IssueCode.DUPLICATE_FINDING, _IssueCode.UNKNOWN_EVIDENCE_ID}
         )
         assert (
             "Research map validation failed: attempt=2 "
-            "issue_codes=['EXCERPT_NOT_FOUND', 'PAGE_MISMATCH']"
+            "issue_codes=['DUPLICATE_FINDING', 'UNKNOWN_EVIDENCE_ID']"
             in caplog.messages
         )
-        assert "SENTINEL_MODEL_OUTPUT_EXCERPT" not in caplog.text
+        assert "SENTINEL_MODEL_OUTPUT_ID" not in caplog.text
 
     def test_corrective_raised_issue_codes_and_chain_are_handled(
         self,
@@ -1455,7 +1117,7 @@ class TestIssueCodes:
 
         def _parse_with_chained_failure(
             raw: str,
-            selected_chunks: list[Chunk],
+            evidence_catalogue: list[_EvidenceSpan],
         ) -> tuple[_InternalResearchMap, set[str]]:
             nonlocal parse_calls
             parse_calls += 1
@@ -1467,7 +1129,7 @@ class TestIssueCodes:
                         "SENTINEL_OUTER_EXCEPTION",
                         issue_codes={_IssueCode.INVALID_SCHEMA},
                     ) from cause
-            return original_parse(raw, selected_chunks)
+            return original_parse(raw, evidence_catalogue)
 
         monkeypatch.setattr(service, "_parse_and_validate", _parse_with_chained_failure)
         caplog.set_level(logging.WARNING, logger="app.services.research_map")

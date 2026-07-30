@@ -78,17 +78,8 @@ def _extract_context(prompt: str) -> list[dict[str, Any]]:
     return context
 
 
-def _excerpt(text: str, marker: str) -> str:
-    """Return a short excerpt that is guaranteed to be contained in *text*."""
-    normalised = " ".join(text.split())
-    marker_index = normalised.find(marker)
-    if marker_index >= 0:
-        return normalised[marker_index: marker_index + 120]
-    return normalised[:120]
-
-
 class DeterministicProvider(LLMProvider):
-    """Fake provider returning valid internal-schema JSON using real chunks."""
+    """Fake provider returning valid evidence-ID JSON from the real catalogue."""
 
     def __init__(self) -> None:
         self.call_count = 0
@@ -104,45 +95,38 @@ class DeterministicProvider(LLMProvider):
         assert max_tokens > 0
         assert 0.0 <= temperature <= 2.0
         context = _extract_context(prompt)
-        chunk = context[0]
-        chunk_id = chunk["chunk_id"]
-        page = chunk["page"]
-        text = chunk["text"]
+        evidence_id = context[0]["evidence_id"]
 
-        def evidence(marker: str) -> dict[str, Any]:
-            return {
-                "chunk_id": chunk_id,
-                "page": page,
-                "excerpt": _excerpt(text, marker),
-            }
+        def evidence() -> dict[str, Any]:
+            return {"evidence_id": evidence_id}
 
         return json.dumps(
             {
                 "research_question": {
                     "statement": "Does a structured research map preserve evidence?",
-                    "evidence": [evidence("Research question:")],
+                    "evidence": [evidence()],
                 },
                 "findings": [
                     {
                         "statement": "The prototype extracts selectable text from uploaded PDFs.",
-                        "evidence": [evidence("Finding one:")],
+                        "evidence": [evidence()],
                         "confidence": "high",
                     },
                     {
                         "statement": "Findings keep chunk identifiers and one-based page provenance.",
-                        "evidence": [evidence("Finding two:")],
+                        "evidence": [evidence()],
                         "confidence": "partial",
                     },
                     {
                         "statement": "Limitations remain visible for expert review.",
-                        "evidence": [evidence("Finding three:")],
+                        "evidence": [evidence()],
                         "confidence": "high",
                     },
                 ],
                 "limitations": [
                     {
                         "statement": "The test document is synthetic and intentionally small.",
-                        "evidence": [evidence("Limitation:")],
+                        "evidence": [evidence()],
                     }
                 ],
             }

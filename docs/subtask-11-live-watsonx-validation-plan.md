@@ -1674,3 +1674,22 @@ unit, or stopping within a number, apostrophe/hyphen-joined word, or confidence
 interval. Deterministic boundary guards now reject those cases while retaining
 exact contiguous normalized matching and the established long-excerpt behavior.
 No fuzzy or semantic similarity was introduced, and no paid rerun occurred.
+
+## 24. Tier C deterministic evidence-span preparation
+
+Conservative normalization did not resolve the real `EXCERPT_NOT_FOUND`
+result, and the corrective attempt again returned `INVALID_SCHEMA`. That
+failure path is now removed from model control.
+After bounded chunk selection, the backend deterministically creates exact
+source spans of at most 300 characters in document order and assigns stable
+opaque IDs (`E0001`, `E0002`, ...). The model returns only those IDs; the backend
+resolves each valid ID to the original chunk ID, page, and exact span text when
+constructing the unchanged public `ResearchMap`.
+
+Unknown or case-mismatched IDs fail with the safe allowlisted
+`UNKNOWN_EVIDENCE_ID` diagnostic. The corrective attempt lists only valid
+evidence IDs. The former evidence-normalization and substring-boundary path is
+no longer active; no fuzzy, semantic, normalized, or model-authored excerpt
+matching remains. Prompt safety rules, model settings, provider behavior,
+corrective retry count, and public schemas/API responses are unchanged. No paid
+or live rerun occurred during implementation.

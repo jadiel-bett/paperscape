@@ -21,6 +21,7 @@ import logging
 import re
 import unicodedata
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,7 @@ _DISCLAIMER: str = (
     "does not replace expert review."
 )
 _CONTEXT_SENTINEL: str = "__PAPER_CONTEXT_JSON__"
+_MAX_EVIDENCE_SPAN_CHARS: int = 300
 
 # Section-priority configuration.
 # Keys are lower-cased section keywords; values are the priority rank
@@ -67,9 +69,7 @@ class _IssueCode:
     INVALID_JSON = "INVALID_JSON"
     INVALID_SCHEMA = "INVALID_SCHEMA"
     WRONG_FINDING_COUNT = "WRONG_FINDING_COUNT"
-    UNKNOWN_CHUNK_ID = "UNKNOWN_CHUNK_ID"
-    PAGE_MISMATCH = "PAGE_MISMATCH"
-    EXCERPT_NOT_FOUND = "EXCERPT_NOT_FOUND"
+    UNKNOWN_EVIDENCE_ID = "UNKNOWN_EVIDENCE_ID"
     DUPLICATE_FINDING = "DUPLICATE_FINDING"
     DUPLICATE_EVIDENCE = "DUPLICATE_EVIDENCE"
     MISSING_LIMITATION = "MISSING_LIMITATION"
@@ -81,9 +81,7 @@ _SAFE_ISSUE_CODES: frozenset[str] = frozenset(
         _IssueCode.INVALID_JSON,
         _IssueCode.INVALID_SCHEMA,
         _IssueCode.WRONG_FINDING_COUNT,
-        _IssueCode.UNKNOWN_CHUNK_ID,
-        _IssueCode.PAGE_MISMATCH,
-        _IssueCode.EXCERPT_NOT_FOUND,
+        _IssueCode.UNKNOWN_EVIDENCE_ID,
         _IssueCode.DUPLICATE_FINDING,
         _IssueCode.DUPLICATE_EVIDENCE,
         _IssueCode.MISSING_LIMITATION,
@@ -132,143 +130,35 @@ def _normalize_text(text: str) -> str:
     return collapsed.strip()
 
 
-_EVIDENCE_PUNCTUATION_TRANSLATION = str.maketrans(
-    {
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201a": "'",
-        "\u201b": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u201e": '"',
-        "\u201f": '"',
-        "\u2010": "-",
-        "\u2011": "-",
-        "\u2012": "-",
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2015": "-",
-    }
-)
-# Letters only: numeric ranges and signed values must retain their dash.
-_WORD_INTERNAL_PDF_HYPHENATION = re.compile(
-    r"(?<=[^\W\d_])-\s+(?=[^\W\d_])",
-    flags=re.UNICODE,
-)
-_OMITTED_LEADING_QUALIFIER = re.compile(
-    r"(?:"
-    r"\b(?:may|might|can|could|would|should|not|no|"
-    r"possibly|probably|likely|unlikely|approximately|about|around|nearly|"
-    r"potentially|perhaps|generally|often|sometimes|typically|roughly|only)"
-    r"|\bat\s+(?:least|most)"
-    r"|\bup\s+to"
-    r")\s+$",
-    flags=re.UNICODE,
-)
-_OMITTED_TRAILING_QUALIFIER = re.compile(
-    r"^\s*(?:[,;:]\s*)?"
-    r"(?:possibly|probably|likely|unlikely|approximately|potentially|perhaps|"
-    r"generally|often|sometimes|typically|roughly|only)\b",
-    flags=re.UNICODE,
-)
-_TRUNCATED_NUMERIC_SUFFIX = re.compile(
-    r"(?:"
-    r"[.,]\d"
-    r"|\s*[%\u2030\u00b0]"
-    r"|\s*[+\-\u2212]\s*\d"
-    r"|\s+[^\W\d_]"
-    r")",
-    flags=re.UNICODE,
-)
-
-
-def _normalize_evidence_text(text: str) -> str:
-    """Normalize bounded representation artifacts for excerpt containment."""
-    normalized = unicodedata.normalize("NFKC", text).casefold()
-    normalized = normalized.replace("\u00ad", "")
-    normalized = normalized.translate(_EVIDENCE_PUNCTUATION_TRANSLATION)
-    normalized = _WORD_INTERNAL_PDF_HYPHENATION.sub("", normalized)
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
-def _has_safe_evidence_boundaries(source: str, start: int, end: int) -> bool:
-    """Reject substring matches that truncate words or semantic modifiers."""
-    excerpt = source[start:end]
-
-    if start > 0 and source[start - 1].isalnum() and excerpt[0].isalnum():
-        return False
-    if end < len(source) and source[end].isdigit() and excerpt[-1].isdigit():
-        return False
-
-    leading = source[:start]
-    if (
-        start >= 2
-        and source[start - 1] in {"'", "-"}
-        and source[start - 2].isalnum()
-        and excerpt[0].isalnum()
-    ):
-        return False
-    if excerpt[0].isdigit() and re.search(
-        r"(?:[+\-\u2212]\s*|\d[.,])$",
-        leading,
-        flags=re.UNICODE,
-    ):
-        return False
-    if excerpt[0].isalpha() and _OMITTED_LEADING_QUALIFIER.search(leading):
-        return False
-
-    trailing = source[end:]
-    if (
-        end + 1 < len(source)
-        and source[end] in {"'", "-"}
-        and source[end + 1].isalnum()
-        and excerpt[-1].isalnum()
-    ):
-        return False
-    if excerpt[-1].isdigit() and _TRUNCATED_NUMERIC_SUFFIX.match(trailing):
-        return False
-    if _OMITTED_TRAILING_QUALIFIER.match(trailing):
-        return False
-
-    return True
-
-
-def _contains_evidence_excerpt(excerpt: str, source: str) -> bool:
-    """Return whether an exact contiguous match has safe evidence boundaries."""
-    if not excerpt:
-        return False
-
-    start = source.find(excerpt)
-    while start != -1:
-        end = start + len(excerpt)
-        if _has_safe_evidence_boundaries(source, start, end):
-            return True
-        start = source.find(excerpt, start + 1)
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Internal grounded schemas (private)
 # ---------------------------------------------------------------------------
 
 
-class _InternalEvidence(BaseModel):
-    """A single evidence record as returned by the model."""
+@dataclass(frozen=True, slots=True)
+class _EvidenceSpan:
+    """Backend-owned source span exposed to the model by an opaque ID."""
+
+    evidence_id: str
+    chunk_id: str
+    page: int
+    section: str | None
+    text: str
+
+
+class _InternalEvidenceReference(BaseModel):
+    """A model-returned reference to a backend-owned evidence span."""
 
     model_config = ConfigDict(extra="forbid")
 
-    chunk_id: str = Field(min_length=1)
-    page: int = Field(ge=1)
-    excerpt: str = Field(min_length=1, max_length=300)
+    evidence_id: str = Field(min_length=1)
 
-    @field_validator("chunk_id", "excerpt", mode="before")
+    @field_validator("evidence_id", mode="before")
     @classmethod
-    def _strip_and_require_nonblank(cls, v: object) -> object:
+    def _require_nonblank(cls, v: object) -> object:
         if isinstance(v, str):
-            stripped = v.strip()
-            if not stripped:
+            if not v.strip():
                 raise ValueError("Field must not be blank or whitespace-only.")
-            return stripped
         return v
 
 
@@ -278,7 +168,7 @@ class _InternalGroundedStatement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     statement: str = Field(min_length=1)
-    evidence: list[_InternalEvidence] = Field(min_length=1)
+    evidence: list[_InternalEvidenceReference] = Field(min_length=1)
 
     @field_validator("statement", mode="before")
     @classmethod
@@ -297,7 +187,7 @@ class _InternalFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     statement: str = Field(min_length=1)
-    evidence: list[_InternalEvidence] = Field(min_length=1)
+    evidence: list[_InternalEvidenceReference] = Field(min_length=1)
     confidence: str = Field(...)  # validated post-Pydantic for "high" | "partial"
 
     @field_validator("statement", mode="before")
@@ -376,6 +266,71 @@ def _word_count(text: str) -> int:
     return len(text.split())
 
 
+def _split_evidence_text(text: str) -> list[str]:
+    """Split source text into deterministic exact spans of at most 300 chars."""
+    if not text.strip():
+        return []
+
+    if len(text.strip()) <= _MAX_EVIDENCE_SPAN_CHARS:
+        return [text.strip()]
+
+    spans: list[str] = []
+    start = 0
+    text_length = len(text)
+
+    while start < text_length:
+        while start < text_length and text[start].isspace():
+            start += 1
+        if start >= text_length:
+            break
+
+        limit = min(start + _MAX_EVIDENCE_SPAN_CHARS, text_length)
+        end = limit
+
+        if limit < text_length:
+            paragraph_break = text.rfind("\n\n", start + 1, limit + 1)
+            if paragraph_break > start:
+                end = paragraph_break
+            else:
+                sentence_ends = list(
+                    re.finditer(r"[.!?](?=\s|$)", text[start:limit])
+                )
+                if sentence_ends:
+                    end = start + sentence_ends[-1].end()
+                else:
+                    whitespace_break = max(
+                        text.rfind(" ", start + 1, limit + 1),
+                        text.rfind("\n", start + 1, limit + 1),
+                        text.rfind("\t", start + 1, limit + 1),
+                    )
+                    if whitespace_break > start:
+                        end = whitespace_break
+
+        span = text[start:end].strip()
+        if span:
+            spans.append(span)
+        start = end
+
+    return spans
+
+
+def _build_evidence_catalogue(selected_chunks: list[Chunk]) -> list[_EvidenceSpan]:
+    """Build stable backend-owned evidence spans in selected-document order."""
+    catalogue: list[_EvidenceSpan] = []
+    for chunk in selected_chunks:
+        for text in _split_evidence_text(chunk.text):
+            catalogue.append(
+                _EvidenceSpan(
+                    evidence_id=f"E{len(catalogue) + 1:04d}",
+                    chunk_id=chunk.chunk_id,
+                    page=chunk.page,
+                    section=chunk.section,
+                    text=text,
+                )
+            )
+    return catalogue
+
+
 # ---------------------------------------------------------------------------
 # ResearchMapService
 # ---------------------------------------------------------------------------
@@ -441,9 +396,10 @@ class ResearchMapService:
         """
         # Step 1 — select bounded source chunks.
         selected = self._select_chunks(extraction)
+        evidence_catalogue = _build_evidence_catalogue(selected)
 
         # Step 2 — build the initial grounded prompt.
-        base_prompt = self._build_prompt(selected)
+        base_prompt = self._build_prompt(evidence_catalogue)
 
         # Step 3 — first generation attempt.
         issue_codes: set[str] = set()
@@ -453,9 +409,11 @@ class ResearchMapService:
                 max_tokens=_MAP_MAX_TOKENS,
                 temperature=_MAP_TEMPERATURE,
             )
-            parsed, issues = self._parse_and_validate(response, selected)
+            parsed, issues = self._parse_and_validate(response, evidence_catalogue)
             if not issues:
-                return self._to_public_map(parsed, extraction.paper_id)
+                return self._to_public_map(
+                    parsed, extraction.paper_id, evidence_catalogue
+                )
             issue_codes = set(_safe_issue_codes(issues))
         except MapGenerationError as exc:
             issue_codes = set(exc.issue_codes)
@@ -476,7 +434,7 @@ class ResearchMapService:
 
         # Step 4 — corrective retry.
         corrective_prompt = self._build_corrective_prompt(
-            base_prompt, issue_codes, selected
+            base_prompt, issue_codes, evidence_catalogue
         )
         try:
             response = self._provider.generate(
@@ -484,14 +442,18 @@ class ResearchMapService:
                 max_tokens=_MAP_MAX_TOKENS,
                 temperature=_MAP_TEMPERATURE,
             )
-            parsed, remaining_issues = self._parse_and_validate(response, selected)
+            parsed, remaining_issues = self._parse_and_validate(
+                response, evidence_catalogue
+            )
             if remaining_issues:
                 final_error = MapGenerationError(
                     "Research map generation failed after corrective retry.",
                     issue_codes=remaining_issues,
                 )
             else:
-                return self._to_public_map(parsed, extraction.paper_id)
+                return self._to_public_map(
+                    parsed, extraction.paper_id, evidence_catalogue
+                )
         except MapGenerationError as exc:
             final_error = MapGenerationError(
                 "Research map generation failed after corrective retry.",
@@ -604,17 +566,18 @@ class ResearchMapService:
     # Prompt building
     # ------------------------------------------------------------------
 
-    def _build_prompt(self, selected_chunks: list[Chunk]) -> str:
-        """Build the full prompt string for the given *selected_chunks*."""
+    def _build_prompt(self, evidence_catalogue: list[_EvidenceSpan]) -> str:
+        """Build the full prompt string for the backend evidence catalogue."""
         serialized = json.dumps(
             [
                 {
-                    "chunk_id": c.chunk_id,
-                    "page": c.page,
-                    "section": c.section,
-                    "text": c.text,
+                    "evidence_id": span.evidence_id,
+                    "chunk_id": span.chunk_id,
+                    "page": span.page,
+                    "section": span.section,
+                    "text": span.text,
                 }
-                for c in selected_chunks
+                for span in evidence_catalogue
             ],
             ensure_ascii=False,
         )
@@ -628,23 +591,19 @@ class ResearchMapService:
         self,
         original_prompt: str,
         issue_codes: set[str],
-        selected_chunks: list[Chunk],
+        evidence_catalogue: list[_EvidenceSpan],
     ) -> str:
-        """Build a corrective prompt with safe issue codes and valid chunks."""
-        valid_chunks_json = json.dumps(
-            [
-                {"chunk_id": c.chunk_id, "page": c.page}
-                for c in selected_chunks
-            ],
-            ensure_ascii=False,
+        """Build a corrective prompt with safe issue codes and evidence IDs."""
+        valid_evidence_ids = json.dumps(
+            [span.evidence_id for span in evidence_catalogue]
         )
         codes_list = ", ".join(sorted(issue_codes))
         correction_section = (
             "\n\nCORRECTION REQUIRED\n"
             "The previous response contained the following issues:\n"
             f"{codes_list}\n\n"
-            "Valid chunk IDs and pages:\n"
-            f"{valid_chunks_json}\n\n"
+            "Valid evidence IDs:\n"
+            f"{valid_evidence_ids}\n\n"
             "Regenerate the complete JSON research map. "
             "Return ONLY valid JSON. No markdown fences, prose, or commentary."
         )
@@ -657,7 +616,7 @@ class ResearchMapService:
     def _parse_and_validate(
         self,
         raw: str,
-        selected_chunks: list[Chunk],
+        evidence_catalogue: list[_EvidenceSpan],
     ) -> tuple[_InternalResearchMap, set[str]]:
         """Parse *raw* model output and validate it.
 
@@ -730,7 +689,7 @@ class ResearchMapService:
                 issues.add(_IssueCode.UNCERTAIN_CONFIDENCE)
 
         # --- Step 4: evidence grounding ---
-        grounding_issues = self._validate_evidence(parsed, selected_chunks)
+        grounding_issues = self._validate_evidence(parsed, evidence_catalogue)
         issues.update(grounding_issues)
 
         return parsed, issues
@@ -742,19 +701,21 @@ class ResearchMapService:
     def _validate_evidence(
         self,
         internal_map: _InternalResearchMap,
-        selected_chunks: list[Chunk],
+        evidence_catalogue: list[_EvidenceSpan],
     ) -> set[str]:
-        """Validate all evidence against the selected chunks.
+        """Validate all model-returned references against the catalogue.
 
         Returns a set of issue codes; an empty set means all evidence is valid.
         """
         issues: set[str] = set()
 
-        selected_lookup: dict[str, Chunk] = {
-            c.chunk_id: c for c in selected_chunks
+        evidence_lookup: dict[str, _EvidenceSpan] = {
+            span.evidence_id: span for span in evidence_catalogue
         }
 
-        all_grounded: list[tuple[str, list[_InternalEvidence], str]] = [
+        all_grounded: list[
+            tuple[str, list[_InternalEvidenceReference], str]
+        ] = [
             ("research_question", internal_map.research_question.evidence, ""),
         ]
         for idx, finding in enumerate(internal_map.findings):
@@ -769,39 +730,18 @@ class ResearchMapService:
         if len(set(finding_statements_normalized)) != len(finding_statements_normalized):
             issues.add(_IssueCode.DUPLICATE_FINDING)
 
-        for label, evidence_list, owner_text in all_grounded:
-            seen_evidence_keys: set[tuple[str, int, str]] = set()
+        for _label, evidence_list, _owner_text in all_grounded:
+            seen_evidence_ids: set[str] = set()
 
-            for ev_idx, ev in enumerate(evidence_list):
-                # chunk_id exists in selected_lookup.
-                if ev.chunk_id not in selected_lookup:
-                    issues.add(_IssueCode.UNKNOWN_CHUNK_ID)
+            for evidence in evidence_list:
+                if evidence.evidence_id not in evidence_lookup:
+                    issues.add(_IssueCode.UNKNOWN_EVIDENCE_ID)
                     continue
 
-                source_chunk = selected_lookup[ev.chunk_id]
-
-                # page match.
-                if ev.page != source_chunk.page:
-                    issues.add(_IssueCode.PAGE_MISMATCH)
-                    continue
-
-                # excerpt containment.
-                evidence_excerpt = _normalize_evidence_text(ev.excerpt)
-                evidence_source = _normalize_evidence_text(source_chunk.text)
-                if not _contains_evidence_excerpt(
-                    evidence_excerpt,
-                    evidence_source,
-                ):
-                    issues.add(_IssueCode.EXCERPT_NOT_FOUND)
-                    continue
-
-                # exact duplicate evidence within this grounded statement.
-                norm_excerpt = _normalize_text(ev.excerpt)
-                ev_key = (ev.chunk_id, ev.page, norm_excerpt)
-                if ev_key in seen_evidence_keys:
+                if evidence.evidence_id in seen_evidence_ids:
                     issues.add(_IssueCode.DUPLICATE_EVIDENCE)
                 else:
-                    seen_evidence_keys.add(ev_key)
+                    seen_evidence_ids.add(evidence.evidence_id)
 
         # Check evidence presence for all grounded statements.
         if not internal_map.research_question.evidence:
@@ -825,8 +765,12 @@ class ResearchMapService:
         self,
         internal: _InternalResearchMap,
         paper_id: str,
+        evidence_catalogue: list[_EvidenceSpan],
     ) -> ResearchMap:
         """Convert an internal draft to the public :class:`ResearchMap`."""
+        evidence_lookup = {
+            span.evidence_id: span for span in evidence_catalogue
+        }
         return ResearchMap(
             paper_id=paper_id,
             research_question=internal.research_question.statement,
@@ -835,9 +779,9 @@ class ResearchMapService:
                     statement=f.statement,
                     evidence=[
                         Evidence(
-                            chunk_id=e.chunk_id,
-                            page=e.page,
-                            excerpt=e.excerpt,
+                            chunk_id=evidence_lookup[e.evidence_id].chunk_id,
+                            page=evidence_lookup[e.evidence_id].page,
+                            excerpt=evidence_lookup[e.evidence_id].text,
                         )
                         for e in f.evidence
                     ],

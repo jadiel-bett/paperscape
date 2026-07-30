@@ -2,44 +2,28 @@
   "research_question": {
     "statement": "Can drought-resistant maize varieties maintain commercially viable grain yields under managed water-deficit conditions in semi-arid eastern Kenya?",
     "evidence": [
-      {
-        "chunk_id": "eval-paper-001-p1-1",
-        "page": 1,
-        "excerpt": "The primary objective was to determine whether these varieties could maintain grain yields above 2.5 tonnes per hectare under managed drought stress."
-      }
+      { "evidence_id": "E0002" }
     ]
   },
   "findings": [
     {
       "statement": "Variety V2 achieved the highest average grain yield at 3.1 t/ha under drought stress, significantly outperforming V1.",
       "evidence": [
-        {
-          "chunk_id": "eval-paper-001-p3-1",
-          "page": 3,
-          "excerpt": "V2 produced a mean yield of 3.1 t/ha (SD = 0.42), which was significantly higher than V1 at 2.3 t/ha (p = 0.008)."
-        }
+        { "evidence_id": "E0010" }
       ],
       "confidence": "high"
     },
     {
       "statement": "V3 yielded 2.8 t/ha under drought stress and was not significantly different from V2, suggesting similar drought tolerance.",
       "evidence": [
-        {
-          "chunk_id": "eval-paper-001-p3-1",
-          "page": 3,
-          "excerpt": "V3 yielded 2.8 t/ha (SD = 0.38) and was not significantly different from V2 (p = 0.21)."
-        }
+        { "evidence_id": "E0011" }
       ],
       "confidence": "high"
     },
     {
       "statement": "V2 showed the earliest mean flowering at 68 days after planting compared to 74 days for V1, which may be correlated with drought escape.",
       "evidence": [
-        {
-          "chunk_id": "eval-paper-001-p3-2",
-          "page": 3,
-          "excerpt": "V2 showed the earliest mean flowering at 68 days after planting, compared to 74 days for V1."
-        }
+        { "evidence_id": "E0013" }
       ],
       "confidence": "partial"
     }
@@ -48,11 +32,7 @@
     {
       "statement": "The study was conducted at a single site over two seasons, which limits the generalisability of the results to other agro-ecological zones.",
       "evidence": [
-        {
-          "chunk_id": "eval-paper-001-p4-1",
-          "page": 4,
-          "excerpt": "The results should be interpreted with caution given that the study was conducted at a single site over two seasons."
-        }
+        { "evidence_id": "E0016" }
       ]
     }
   ]
