@@ -95,38 +95,51 @@ class DeterministicProvider(LLMProvider):
         assert max_tokens > 0
         assert 0.0 <= temperature <= 2.0
         context = _extract_context(prompt)
-        evidence_id = context[0]["evidence_id"]
+        evidence_ids = [item["evidence_id"] for item in context]
+        assert len(evidence_ids) >= 2
+        if len(evidence_ids) >= 3:
+            finding_evidence_ids = [
+                [evidence_ids[0]],
+                [evidence_ids[1]],
+                [evidence_ids[2]],
+            ]
+        else:
+            finding_evidence_ids = [
+                [evidence_ids[0]],
+                [evidence_ids[1]],
+                evidence_ids,
+            ]
 
-        def evidence() -> dict[str, Any]:
-            return {"evidence_id": evidence_id}
+        def evidence(ids: list[str]) -> list[dict[str, Any]]:
+            return [{"evidence_id": evidence_id} for evidence_id in ids]
 
         return json.dumps(
             {
                 "research_question": {
                     "statement": "Does a structured research map preserve evidence?",
-                    "evidence": [evidence()],
+                    "evidence": evidence([evidence_ids[0]]),
                 },
                 "findings": [
                     {
                         "statement": "The prototype extracts selectable text from uploaded PDFs.",
-                        "evidence": [evidence()],
+                        "evidence": evidence(finding_evidence_ids[0]),
                         "confidence": "high",
                     },
                     {
                         "statement": "Findings keep chunk identifiers and one-based page provenance.",
-                        "evidence": [evidence()],
+                        "evidence": evidence(finding_evidence_ids[1]),
                         "confidence": "partial",
                     },
                     {
                         "statement": "Limitations remain visible for expert review.",
-                        "evidence": [evidence()],
+                        "evidence": evidence(finding_evidence_ids[2]),
                         "confidence": "high",
                     },
                 ],
                 "limitations": [
                     {
                         "statement": "The test document is synthetic and intentionally small.",
-                        "evidence": [evidence()],
+                        "evidence": evidence([evidence_ids[0]]),
                     }
                 ],
             }

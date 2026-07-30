@@ -22,6 +22,9 @@ from app.services.research_map import (
     _MAX_EVIDENCE_SPAN_CHARS,
     _EvidenceSpan,
     _build_evidence_catalogue,
+    _contains_critical_detail,
+    _critical_details_supported,
+    _extract_critical_details,
     _normalize_text,
     _split_evidence_text,
     _section_priority,
@@ -103,7 +106,10 @@ def _default_valid_response() -> str:
                 },
                 {
                     "statement": "Finding two.",
-                    "evidence": [{"evidence_id": "E0002"}],
+                    "evidence": [
+                        {"evidence_id": "E0001"},
+                        {"evidence_id": "E0002"},
+                    ],
                     "confidence": "partial",
                 },
                 {
@@ -122,27 +128,29 @@ def _default_valid_response() -> str:
     )
 
 
-def _single_evidence_response(evidence_id: str = "E0001") -> str:
-    """Return a valid internal map whose statements use one evidence ID."""
-    evidence = [{"evidence_id": evidence_id}]
+def _single_evidence_response() -> str:
+    """Return a valid internal map using three distinct finding evidence sets."""
     return json.dumps(
         {
             "research_question": {
                 "statement": "What was studied?",
-                "evidence": evidence,
+                "evidence": [{"evidence_id": "E0001"}],
             },
             "findings": [
                 {
-                    "statement": f"Finding {index}.",
-                    "evidence": evidence,
+                    "statement": f"Finding {label}.",
+                    "evidence": [{"evidence_id": f"E{index:04d}"}],
                     "confidence": "high",
                 }
-                for index in range(1, 4)
+                for index, label in enumerate(
+                    ("alpha", "beta", "gamma"),
+                    start=1,
+                )
             ],
             "limitations": [
                 {
                     "statement": "A limitation was reported.",
-                    "evidence": evidence,
+                    "evidence": [{"evidence_id": "E0001"}],
                 }
             ],
         }
@@ -158,6 +166,54 @@ def _make_service(
     provider = FakeLLMProvider(responses)
     service = ResearchMapService(provider=provider, **kwargs)
     return service, provider
+
+
+def _specificity_validation_issues(
+    evidence_texts: list[str],
+    finding_statements: list[str],
+    finding_evidence_ids: list[list[str]],
+) -> set[str]:
+    """Validate a deterministic three-finding specificity fixture."""
+    chunks = [
+        _make_chunk(
+            f"specificity-p{index}-1",
+            page=index,
+            section="Results",
+            text=text,
+        )
+        for index, text in enumerate(evidence_texts, start=1)
+    ]
+    catalogue = _build_evidence_catalogue(chunks)
+    response = {
+        "research_question": {
+            "statement": "What association was studied?",
+            "evidence": [{"evidence_id": "E0001"}],
+        },
+        "findings": [
+            {
+                "statement": statement,
+                "evidence": [
+                    {"evidence_id": evidence_id}
+                    for evidence_id in evidence_ids
+                ],
+                "confidence": "high",
+            }
+            for statement, evidence_ids in zip(
+                finding_statements,
+                finding_evidence_ids,
+                strict=True,
+            )
+        ],
+        "limitations": [
+            {
+                "statement": "The evidence is observational.",
+                "evidence": [{"evidence_id": "E0001"}],
+            }
+        ],
+    }
+    service, _ = _make_service()
+    _, issues = service._parse_and_validate(json.dumps(response), catalogue)
+    return issues
 
 
 # ===================================================================
@@ -823,6 +879,10 @@ class TestEvidenceCatalogue:
         assert '"evidence_id": "E0002"' in prompt
         assert '"evidence_id": "E0003"' in prompt
         assert "Do NOT return chunk_id, page, section, text, or excerpt" in prompt
+        assert "Keep each finding at the same level of specificity" in prompt
+        assert "Select multiple evidence IDs when one span is insufficient" in prompt
+        assert "broad association, produce only a broad association" in prompt
+        assert "Do NOT reuse the exact same complete evidence-ID set" in prompt
 
     def test_corrective_prompt_lists_only_valid_evidence_ids(self) -> None:
         service, provider = _make_service(
@@ -836,6 +896,388 @@ class TestEvidenceCatalogue:
         assert "test-paper-id" not in correction
         assert '"page"' not in correction
         assert '"text"' not in correction
+
+
+class TestClaimSpecificityGuard:
+    def test_real_bad_output_shape_fails_both_specificity_guards(self) -> None:
+        """Detailed claims cannot all reuse one generic association span."""
+        issues = _specificity_validation_issues(
+            [
+                (
+                    "Overall, heavier social media use was associated with "
+                    "poorer sleep patterns, controlling for covariates."
+                ),
+                "A separate broad observation was reported.",
+                "An observational limitation was reported.",
+            ],
+            [
+                "Use of 5+ hours was associated with specific sleep outcomes.",
+                "Use of 3 to <5 hours affected all six sleep outcomes.",
+                "Use of <1 hour had a free-day waking exception.",
+            ],
+            [["E0001"], ["E0001"], ["E0001"]],
+        )
+
+        assert issues == {
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+        }
+
+    def test_distinct_specific_evidence_sets_are_accepted(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Use of 5+ hours was associated with shorter sleep.",
+                "The measured prevalence was 20.8%.",
+                "The confidence interval was 1.83-2.50.",
+            ],
+            [
+                "Use of 5+ hours was associated with shorter sleep.",
+                "The measured prevalence was 20.8%.",
+                "The confidence interval was 1.83-2.50.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_numeric_threshold_directly_present_is_accepted(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The 5+ hour category had poorer sleep.",
+                "A broad secondary association was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                "The 5+ hour category had poorer sleep.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_multiple_evidence_ids_can_support_multiple_details(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The high-use threshold was 5+ hours.",
+                "The measured prevalence was 20.8%.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                "The 5+ hour group had a prevalence of 20.8%.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001", "E0002"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_critical_detail_cannot_be_synthesized_across_spans(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The first selected span ends with 3",
+                "to <5 hours begins the second selected span.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                "Use of 3 to <5 hours was associated with poorer sleep.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001", "E0002"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNSUPPORTED_CLAIM_DETAIL}
+
+    def test_findings_may_share_one_id_when_complete_sets_differ(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "A broad shared association was reported.",
+                "Additional support described sleep duration.",
+                "Additional support described waking time.",
+            ],
+            [
+                "A broad first association was reported.",
+                "A broad second association was reported.",
+                "A broad third association was reported.",
+            ],
+            [
+                ["E0001"],
+                ["E0001", "E0002"],
+                ["E0001", "E0003"],
+            ],
+        )
+
+        assert issues == set()
+
+    def test_repeated_unknown_ids_do_not_cascade_diagnostics(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "A broad first association was reported.",
+                "A broad second association was reported.",
+                "A broad third association was reported.",
+            ],
+            [
+                "The unsupported threshold was 5+ hours.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["UNKNOWN"], ["UNKNOWN"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNKNOWN_EVIDENCE_ID}
+
+    def test_unknown_finding_does_not_hide_resolved_duplicate_sets(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "A broad first association was reported.",
+                "A broad second association was reported.",
+                "A broad third association was reported.",
+            ],
+            [
+                "The unsupported threshold was 5+ hours.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["UNKNOWN"], ["E0002"], ["E0002"]],
+        )
+
+        assert issues == {
+            _IssueCode.UNKNOWN_EVIDENCE_ID,
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+        }
+
+    def test_broad_paraphrase_is_outside_formal_entailment_guard(self) -> None:
+        """Non-numeric paraphrasing is deliberately not proven or rejected."""
+        issues = _specificity_validation_issues(
+            [
+                "Heavier use was associated with poorer sleep.",
+                "A broad secondary association was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                "Greater use was linked to worse sleep.",
+                "A differently worded secondary finding was reported.",
+                "A differently worded tertiary finding was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_comparison_normalization_is_conservative(self) -> None:
+        assert _critical_details_supported(
+            "The rate was < 5% across 1.83–2.50.",
+            ["The rate was <5% across 1.83-2.50."],
+        )
+        assert _critical_details_supported(
+            "All six outcomes had a full-width rate of ２０.８％.",
+            ["All six outcomes had a full-width rate of 20.8%."],
+        )
+        assert not _critical_details_supported(
+            "The 5+ hour group differed.",
+            ["The group used social media for at least five hours."],
+        )
+        assert not _critical_details_supported(
+            "All six outcomes differed.",
+            ["All 6 outcomes differed."],
+        )
+
+    @pytest.mark.parametrize(
+        ("statement", "evidence"),
+        [
+            ("The change was 5%.", "The change was 0.5%."),
+            ("The measured value was 5.", "The measured value was 0.5."),
+            ("The measured value was 5.", "The measured value was 5.2."),
+            ("The measured value was 5.", "The measured value was 5%."),
+            ("The measured value was 5.", "The measured value was 5+."),
+            ("The measured value was 5.", "The measured value was -5."),
+            ("The measured value was 5.", "The measured value was +5."),
+            ("The measured value was 5.", "The measured value was 15."),
+            ("The measured value was 5.", "The measured value was 5,000."),
+            ("The measured value was 5.", "The measured value was 5/10."),
+            ("The measured value was 5.", "The measured value was 5:1."),
+        ],
+        ids=[
+            "percent-in-decimal",
+            "bare-in-decimal",
+            "bare-in-longer-decimal",
+            "bare-in-percent",
+            "bare-in-plus-suffix",
+            "bare-in-negative",
+            "bare-in-positive",
+            "bare-in-larger-integer",
+            "bare-in-comma-number",
+            "bare-in-ratio-slash",
+            "bare-in-ratio-colon",
+        ],
+    )
+    def test_numeric_subtokens_are_rejected(
+        self,
+        statement: str,
+        evidence: str,
+    ) -> None:
+        issues = _specificity_validation_issues(
+            [
+                evidence,
+                "A broad secondary association was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                statement,
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNSUPPORTED_CLAIM_DETAIL}
+
+    @pytest.mark.parametrize(
+        ("detail", "evidence"),
+        [
+            ("5", "The measured value was 5 hours."),
+            ("5%", "The measured value was 5% of participants."),
+            ("5+", "The measured value was 5+ hours."),
+            ("-5%", "The measured value was -5% of participants."),
+            ("<5", "The measured value was <5 hours."),
+            ("3 to <5", "The measured value was 3 to <5 hours."),
+        ],
+        ids=[
+            "bare-number",
+            "percentage",
+            "plus-suffix",
+            "signed-percentage",
+            "comparator",
+            "range",
+        ],
+    )
+    def test_complete_numeric_tokens_are_supported(
+        self,
+        detail: str,
+        evidence: str,
+    ) -> None:
+        statement = f"The measured value was {detail}."
+        assert _contains_critical_detail(
+            evidence.casefold(),
+            detail.casefold(),
+        )
+        assert _critical_details_supported(statement, [evidence])
+
+    @pytest.mark.parametrize(
+        ("statement", "expected"),
+        [
+            ("The measured total was zero.", ("zero",)),
+            ("The measured total was six.", ("six",)),
+            ("The reported count was twelve.", ("twelve",)),
+            ("The number observed was five.", ("five",)),
+            ("The sample size was twenty.", ("twenty",)),
+        ],
+    )
+    def test_standalone_number_words_in_quantitative_contexts(
+        self,
+        statement: str,
+        expected: tuple[str, ...],
+    ) -> None:
+        assert _extract_critical_details(statement) == expected
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "Section six.",
+            "Group twelve.",
+            "Model twenty.",
+            "The category was six.",
+            "Category six outcomes were described.",
+            "Version six results were reported.",
+        ],
+    )
+    def test_number_words_in_label_contexts_are_not_extracted(
+        self,
+        statement: str,
+    ) -> None:
+        assert _extract_critical_details(statement) == ()
+
+    @pytest.mark.parametrize(
+        ("statement", "evidence"),
+        [
+            (
+                "Use of 5+ hours was associated with poorer sleep.",
+                "Heavier use was associated with poorer sleep.",
+            ),
+            (
+                "Use of <1 hour was associated with poorer sleep.",
+                "Low use was associated with poorer sleep.",
+            ),
+            (
+                "All six sleep outcomes were poorer.",
+                "All sleep outcomes were poorer.",
+            ),
+            (
+                "The measured prevalence was 20.8%.",
+                "The measured prevalence was 20.7%.",
+            ),
+            (
+                "The confidence interval was 1.83-2.50.",
+                "The confidence interval was 1.83-2.40.",
+            ),
+            (
+                "Use of <5 hours was associated with poorer sleep.",
+                "Use of <=5 hours was associated with poorer sleep.",
+            ),
+            (
+                "The 95% confidence interval was 1.2-1.8.",
+                "The 95% confidence interval was 1.3-1.8.",
+            ),
+            (
+                "The change was 5%.",
+                "The change was -5%.",
+            ),
+            (
+                "The change was +5%.",
+                "The change was -5%.",
+            ),
+        ],
+        ids=[
+            "unsupported-plus-threshold",
+            "unsupported-less-than-threshold",
+            "unsupported-all-six",
+            "changed-percentage",
+            "changed-range",
+            "changed-comparator",
+            "unsupported-confidence-interval",
+            "removed-sign",
+            "changed-sign",
+        ],
+    )
+    def test_unsupported_critical_details_are_rejected(
+        self,
+        statement: str,
+        evidence: str,
+    ) -> None:
+        issues = _specificity_validation_issues(
+            [
+                evidence,
+                "A broad secondary association was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                statement,
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNSUPPORTED_CLAIM_DETAIL}
+
+    def test_critical_detail_extraction_is_surface_based(self) -> None:
+        assert _extract_critical_details(
+            "The 5+ and <1 groups ranged from 3 to <5 hours; "
+            "20.8% had a 1.83–2.50 interval across all six outcomes."
+        ) == ("5+", "<1", "3 to <5", "20.8%", "1.83-2.50", "all six")
 
 
 # ===================================================================
@@ -1004,6 +1446,14 @@ class TestIssueCodes:
         assert _IssueCode.UNKNOWN_EVIDENCE_ID == "UNKNOWN_EVIDENCE_ID"
         assert _IssueCode.DUPLICATE_FINDING == "DUPLICATE_FINDING"
         assert _IssueCode.DUPLICATE_EVIDENCE == "DUPLICATE_EVIDENCE"
+        assert (
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE
+            == "DUPLICATE_FINDING_EVIDENCE"
+        )
+        assert (
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL
+            == "UNSUPPORTED_CLAIM_DETAIL"
+        )
         assert _IssueCode.MISSING_LIMITATION == "MISSING_LIMITATION"
         assert _IssueCode.UNCERTAIN_CONFIDENCE == "UNCERTAIN_CONFIDENCE"
 
@@ -1075,6 +1525,52 @@ class TestIssueCodes:
         assert prompt_sentinel not in complete_log
         assert output_sentinel not in complete_log
         assert chunk_sentinel not in complete_log
+
+    def test_unsupported_detail_log_does_not_include_expression_or_source(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        unsupported_expression = "5+"
+        source_sentinel = "SENTINEL_SPECIFICITY_SOURCE"
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["statement"] = (
+            f"The unsupported threshold was {unsupported_expression}."
+        )
+        extraction = _make_extraction(
+            chunks=[
+                _make_chunk(
+                    "test-paper-id-p1-1",
+                    page=1,
+                    section="Abstract",
+                    text=f"Abstract content. {source_sentinel}",
+                ),
+                _make_chunk(
+                    "test-paper-id-p3-1",
+                    page=3,
+                    section="Results",
+                    text="Results content showing data.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p4-1",
+                    page=4,
+                    section="Discussion",
+                    text="Discussion of findings.",
+                ),
+            ]
+        )
+        service, _ = _make_service(
+            responses=[json.dumps(invalid), _default_valid_response()]
+        )
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        assert isinstance(service.generate_map(extraction), ResearchMap)
+        assert (
+            "Research map validation failed: attempt=1 "
+            "issue_codes=['UNSUPPORTED_CLAIM_DETAIL']"
+            in caplog.messages
+        )
+        assert unsupported_expression not in caplog.text
+        assert source_sentinel not in caplog.text
 
     def test_corrective_returned_issue_codes_are_preserved(
         self,

@@ -17,6 +17,14 @@ OUTPUT RULES
 - Every evidence item MUST contain exactly one valid evidence_id from the supplied catalogue.
 - Copy each evidence_id exactly, including its case. Do not invent evidence IDs.
 - Do NOT return chunk_id, page, section, text, or excerpt fields in evidence items.
+- Every detail in a finding MUST be directly supported by its selected evidence spans.
+- Every category, threshold, outcome, exception, comparison, range, and number mentioned in a finding MUST appear directly in the selected evidence text.
+- Do NOT use a broad conclusion sentence as evidence for subgroup thresholds, exceptions, individual outcomes, quantities, comparisons, or ranges.
+- Select multiple evidence IDs when one span is insufficient to support every detail.
+- Keep each finding at the same level of specificity as its selected evidence.
+- Do NOT reuse the exact same complete evidence-ID set for two different findings.
+- When evidence supports only a broad association, produce only a broad association statement.
+- Preserve association-versus-causation wording in every finding.
 - Return ONLY valid JSON. No markdown fences, prose, commentary, or chain-of-thought.
 
 CONFIDENCE VALUES

@@ -311,8 +311,10 @@ def test_map_generation_error_logs_only_safe_sorted_issue_codes(
     failure = MapGenerationError(
         "SENTINEL_PROMPT_TEXT SENTINEL_MODEL_OUTPUT",
         issue_codes={
+            "DUPLICATE_FINDING_EVIDENCE",
             "UNKNOWN_EVIDENCE_ID",
             "INVALID_JSON",
+            "UNSUPPORTED_CLAIM_DETAIL",
             "SENTINEL_UNSAFE_ISSUE_CODE",
         },
     )
@@ -335,7 +337,8 @@ def test_map_generation_error_logs_only_safe_sorted_issue_codes(
     assert final.error == "map_generation_failed"
     assert (
         "Research map generation failed: "
-        "issue_codes=['INVALID_JSON', 'UNKNOWN_EVIDENCE_ID']"
+        "issue_codes=['DUPLICATE_FINDING_EVIDENCE', 'INVALID_JSON', "
+        "'UNKNOWN_EVIDENCE_ID', 'UNSUPPORTED_CLAIM_DETAIL']"
         in caplog.messages
     )
     complete_log = caplog.text

@@ -4396,3 +4396,50 @@ IDs only. The superseded evidence-normalization and boundary-matching code was
 removed; no fuzzy or semantic matching was added. Provider behavior, model
 configuration, retry count, public schemas, API behavior, and job orchestration
 were not changed. No live or paid rerun occurred during implementation.
+
+### Claim-to-evidence specificity preparation
+
+The evidence-ID Tier C job succeeded operationally, but manual semantic review
+rejected its map: all three findings reused one generic broad-association span
+while adding unsupported subgroup thresholds, specific outcomes, and an
+exception.
+
+The backend now rejects identical complete evidence-ID sets across distinct
+findings and requires critical numeric surface details in each finding to occur
+in that finding's selected exact spans. The bounded guard covers digit
+quantities, comparators, plus thresholds, percentages, ranges, confidence
+intervals, and quantitative number words from zero through twenty using only
+conservative representation normalization. Diagnostics expose only
+`DUPLICATE_FINDING_EVIDENCE` or `UNSUPPORTED_CLAIM_DETAIL`.
+
+This safeguard is not claimed to provide complete semantic entailment and does
+not formally validate ordinary non-numeric paraphrasing. Deterministic spans,
+backend-owned public provenance, provider/model behavior, retry count, and
+public API shape remain unchanged. No live or paid call occurred during
+implementation.
+
+#### Specificity-guard audit corrections
+
+The first specificity implementation remained uncommitted while a read-only
+audit identified three defects: cross-span concatenation could create a
+synthetic quantitative match, repeated unknown IDs could also trigger a
+duplicate-finding-evidence code, and standalone quantitative number words were
+not detected.
+
+The validator now checks each critical expression against individual spans,
+skips duplicate-set and specificity checks for findings with unresolved IDs,
+and recognizes zero-through-twenty terminal number words only in bounded
+total/count/number/quantity/amount/sample-size constructions with an allowed
+copula. Non-quantitative section, group, category, model, and version labels are
+excluded. The safeguard remains lexical and is not full semantic entailment.
+No live or paid call occurred.
+
+### Numeric-token boundary remediation
+
+The second read-only audit found numeric-subtoken false positives caused by
+word-only boundaries. Quantitative-token-aware matching now prevents shorter
+details from matching inside decimals, percentages, suffix-plus thresholds,
+signed values, larger numbers, and slash/colon ratios, while preserving exact
+bare, percentage, suffix-plus, signed, comparator, range, decimal, and
+confidence-interval matches. Regression coverage was added for each case. No
+prompt or public API behavior changed, and no live call occurred.

@@ -1693,3 +1693,53 @@ no longer active; no fuzzy, semantic, normalized, or model-authored excerpt
 matching remains. Prompt safety rules, model settings, provider behavior,
 corrective retry count, and public schemas/API responses are unchanged. No paid
 or live rerun occurred during implementation.
+
+## 25. Tier C claim-to-evidence specificity preparation
+
+The first real evidence-ID ResearchMap job succeeded operationally, but manual
+semantic review rejected the result. All three findings reused one generic
+association span while introducing subgroup thresholds, individual outcomes,
+and an exception that the selected evidence did not directly support.
+
+Two deterministic validation safeguards were added. Distinct findings may no
+longer reuse the same complete evidence-ID set, and digit-based quantities,
+comparators, ranges, percentages, confidence intervals, and quantitative number
+words from zero through twenty must occur in the finding's selected exact
+evidence spans under conservative surface normalization. Only safe
+`DUPLICATE_FINDING_EVIDENCE` and `UNSUPPORTED_CLAIM_DETAIL` issue codes are
+logged.
+
+This is a bounded factual-detail safeguard, not a complete natural-language
+entailment system. It does not prove ordinary non-numeric paraphrases or broader
+semantic support. Deterministic spans, backend-owned public provenance, prompt
+safety, provider behavior, model settings, and the single corrective retry are
+unchanged. No live or paid call occurred during implementation.
+
+### Specificity-guard audit corrections
+
+The first specificity implementation was not committed. A read-only audit found
+that whitespace-normalized concatenation could synthesize a critical expression
+across two evidence spans, repeated unknown IDs could cascade into a misleading
+duplicate-set diagnostic, and standalone quantitative number words in explicit
+count contexts were missed.
+
+All three findings were corrected. Every critical expression must now occur
+wholly within one selected span; findings with unresolved evidence IDs are
+excluded from duplicate-set and specificity checks; and terminal number words
+from zero through twenty are recognized only behind bounded quantitative cues
+such as total, count, number, quantity, amount, or sample size plus an allowed
+copula. Label contexts such as section, group, category, model, and version stay
+excluded. The guard remains lexical and bounded rather than full semantic
+entailment. No live or paid call occurred.
+
+## 26. Numeric-token boundary remediation
+
+The second read-only audit found numeric-subtoken false positives: word-only
+boundaries accepted `5%` inside `0.5%` and bare `5` inside decimals, signed
+values, percentages, suffix-plus thresholds, larger integers, and ratios.
+The matcher now uses quantitative-token-aware continuation boundaries covering
+digits, letters, decimal and numeric separators, signs, comparators, percent
+signs, range punctuation, and slash/colon ratios. Regressions cover those
+negative cases plus exact bare, percentage, suffix-plus, signed, comparator,
+range, decimal, and confidence-interval matches. No prompt, extraction,
+public API, or provider behavior changed, and no live call occurred.

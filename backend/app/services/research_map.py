@@ -72,6 +72,8 @@ class _IssueCode:
     UNKNOWN_EVIDENCE_ID = "UNKNOWN_EVIDENCE_ID"
     DUPLICATE_FINDING = "DUPLICATE_FINDING"
     DUPLICATE_EVIDENCE = "DUPLICATE_EVIDENCE"
+    DUPLICATE_FINDING_EVIDENCE = "DUPLICATE_FINDING_EVIDENCE"
+    UNSUPPORTED_CLAIM_DETAIL = "UNSUPPORTED_CLAIM_DETAIL"
     MISSING_LIMITATION = "MISSING_LIMITATION"
     UNCERTAIN_CONFIDENCE = "UNCERTAIN_CONFIDENCE"
 
@@ -84,6 +86,8 @@ _SAFE_ISSUE_CODES: frozenset[str] = frozenset(
         _IssueCode.UNKNOWN_EVIDENCE_ID,
         _IssueCode.DUPLICATE_FINDING,
         _IssueCode.DUPLICATE_EVIDENCE,
+        _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+        _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
         _IssueCode.MISSING_LIMITATION,
         _IssueCode.UNCERTAIN_CONFIDENCE,
     }
@@ -128,6 +132,136 @@ def _normalize_text(text: str) -> str:
     nfkc = unicodedata.normalize("NFKC", text)
     collapsed = re.sub(r"\s+", " ", nfkc)
     return collapsed.strip()
+
+
+# Conservative surface normalization used only by the bounded finding-detail
+# guard. It does not alter source spans or public excerpts.
+_DETAIL_TRANSLATION = str.maketrans(
+    {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2015": "-",
+        "\u2264": "<=",
+        "\u2265": ">=",
+    }
+)
+_NUMBER_SURFACE = r"(?:\d+(?:,\d{3})*(?:\.\d+)?)"
+_SIGNED_NUMBER_SURFACE = rf"(?:[+\-\u2212]?{_NUMBER_SURFACE})"
+_COMPARATOR_SURFACE = r"(?:<=|>=|<|>)"
+_CRITICAL_DIGIT_DETAIL = re.compile(
+    rf"""
+    (?<!\w)
+    (?:
+        {_SIGNED_NUMBER_SURFACE}
+        \s*(?:-|to)\s*
+        (?:{_COMPARATOR_SURFACE})?\s*
+        {_SIGNED_NUMBER_SURFACE}
+        (?:\s*%)?
+      |
+        (?:{_COMPARATOR_SURFACE})?\s*
+        {_SIGNED_NUMBER_SURFACE}
+        (?:\+|%)?
+    )
+    (?!\w)
+    """,
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+_NUMBER_WORDS = (
+    "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    "twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+    "nineteen|twenty"
+)
+_CRITICAL_NUMBER_WORD_DETAIL = re.compile(
+    rf"\b(?:all\s+)?(?:{_NUMBER_WORDS})\b(?=\s+[^\W\d_])",
+    flags=re.IGNORECASE | re.UNICODE,
+)
+_NON_QUANTITATIVE_NUMBER_WORD_PREFIX = re.compile(
+    r"\b(?:section|group|category|model|version)\s+$",
+    flags=re.IGNORECASE,
+)
+_QUANTITATIVE_CUE = (
+    r"(?:measured\s+total|reported\s+count|observed\s+number|"
+    r"number\s+observed|sample\s+size|total|count|number|quantity|amount)"
+)
+_QUANTITATIVE_COPULA = r"(?:is|are|was|were|equals|equalled)"
+_CRITICAL_STANDALONE_NUMBER_WORD_DETAIL = re.compile(
+    rf"\b{_QUANTITATIVE_CUE}\s+{_QUANTITATIVE_COPULA}\s+"
+    rf"(?P<number>{_NUMBER_WORDS})\b(?=\s*(?:[.,;:!?)]|$))",
+    flags=re.IGNORECASE,
+)
+# Characters that continue a quantitative token. These are intentionally
+# stricter than word boundaries: punctuation such as decimal points, percent
+# signs, signs, comparators, and ratio separators can still be part of a
+# larger numeric expression.
+_NUMERIC_TOKEN_CONTINUATION = r"\w%+\-\u2212\u2010\u2011\u2012\u2013\u2014\u2015<>=/:"
+
+
+def _normalize_claim_detail_text(text: str) -> str:
+    """Normalize only conservative representation variants for comparison."""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = normalized.translate(_DETAIL_TRANSLATION)
+    normalized = re.sub(r"(<=|>=|<|>)\s*", r"\1", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _extract_critical_details(statement: str) -> tuple[str, ...]:
+    """Extract bounded quantitative surface expressions from a finding."""
+    normalized = _normalize_claim_detail_text(statement)
+    matches = [
+        (match.start(), match.group(0).strip())
+        for match in _CRITICAL_DIGIT_DETAIL.finditer(normalized)
+    ]
+    for match in _CRITICAL_NUMBER_WORD_DETAIL.finditer(normalized):
+        if _NON_QUANTITATIVE_NUMBER_WORD_PREFIX.search(
+            normalized[:match.start()]
+        ):
+            continue
+        matches.append((match.start(), match.group(0).strip()))
+    matches.extend(
+        (match.start("number"), match.group("number"))
+        for match in _CRITICAL_STANDALONE_NUMBER_WORD_DETAIL.finditer(
+            normalized
+        )
+    )
+    matches.sort(key=lambda item: item[0])
+    return tuple(dict.fromkeys(detail for _, detail in matches))
+
+
+def _contains_critical_detail(
+    normalized_span: str,
+    normalized_detail: str,
+) -> bool:
+    """Return whether a detail occurs as a complete lexical token in a span."""
+    escaped_detail = re.escape(normalized_detail)
+    if any(char.isdigit() for char in normalized_detail):
+        continuation = _NUMERIC_TOKEN_CONTINUATION
+        detail_pattern = (
+            rf"(?<![{continuation}.,]){escaped_detail}"
+            rf"(?![{continuation}]|[.,](?=\d))"
+        )
+    else:
+        detail_pattern = rf"(?<!\w){escaped_detail}(?!\w)"
+    return re.search(detail_pattern, normalized_span) is not None
+
+
+def _critical_details_supported(
+    statement: str,
+    evidence_spans: Iterable[str],
+) -> bool:
+    """Return whether each detail occurs wholly within one selected span."""
+    normalized_spans = tuple(
+        _normalize_claim_detail_text(span) for span in evidence_spans
+    )
+    for detail in _extract_critical_details(statement):
+        if not any(
+            _contains_critical_detail(span, detail)
+            for span in normalized_spans
+        ):
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -742,6 +876,53 @@ class ResearchMapService:
                     issues.add(_IssueCode.DUPLICATE_EVIDENCE)
                 else:
                     seen_evidence_ids.add(evidence.evidence_id)
+
+        # Resolve finding evidence before downstream duplicate-set and
+        # specificity checks. Findings with unknown IDs are diagnosed above
+        # and deliberately excluded from both checks.
+        resolved_findings: list[
+            tuple[_InternalFinding, list[_EvidenceSpan]]
+        ] = []
+        for finding in internal_map.findings:
+            if not all(
+                evidence.evidence_id in evidence_lookup
+                for evidence in finding.evidence
+            ):
+                continue
+            resolved_findings.append(
+                (
+                    finding,
+                    [
+                        evidence_lookup[evidence.evidence_id]
+                        for evidence in finding.evidence
+                    ],
+                )
+            )
+
+        # Reject identical complete evidence-ID sets across fully resolved
+        # findings. Set comparison is intentionally order-insensitive.
+        seen_finding_evidence_sets: set[frozenset[str]] = set()
+        for finding, _resolved_spans in resolved_findings:
+            evidence_set = frozenset(
+                evidence.evidence_id for evidence in finding.evidence
+            )
+            if evidence_set in seen_finding_evidence_sets:
+                issues.add(_IssueCode.DUPLICATE_FINDING_EVIDENCE)
+            else:
+                seen_finding_evidence_sets.add(evidence_set)
+
+        # Each critical detail must occur wholly within at least one selected
+        # span. Different spans may support different details.
+        for finding, resolved_spans in resolved_findings:
+            evidence_spans = [
+                span.text
+                for span in resolved_spans
+            ]
+            if not _critical_details_supported(
+                finding.statement,
+                evidence_spans,
+            ):
+                issues.add(_IssueCode.UNSUPPORTED_CLAIM_DETAIL)
 
         # Check evidence presence for all grounded statements.
         if not internal_map.research_question.evidence:
