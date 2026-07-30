@@ -530,6 +530,59 @@ required for acceptance; five is an optional expansion and hard cap. It must
 stop on credential, project, endpoint, model-access, or retry-accounting
 failures.
 
+## Migrated Chat Tier A Paid-Run Decision
+
+**Decision date:** 2026-07-30  
+**Approved by:** Jadiel Bett  
+**Status:** Approved for one invocation
+
+### Decision
+
+Approve one manually initiated Tier A connectivity test through the migrated
+watsonx Chat API.
+
+### Controls
+
+- Run only `test_watsonx_provider_connectivity`.
+- Select it explicitly with `-k provider_connectivity`.
+- Use `ibm/granite-4-h-small` through a process-environment override.
+- Use the Frankfurt `eu-de` endpoint.
+- Limit output to 32 completion tokens.
+- Do not rerun automatically or manually after failure without review.
+- Tier B remains separately blocked.
+- TLS certificate verification is explicitly enabled.
+- SSL fallback is disabled.
+- No installed SDK files are modified.
+- The Lite-plan quota and model availability have been reviewed.
+
+### Known theoretical bound
+
+- Up to four raw inference requests per Chat invocation.
+- `WatsonxProvider` may make two Chat invocations through its one transient
+  retry.
+- Tier A therefore has a theoretical maximum of eight raw inference requests.
+- Authentication and provider-construction requests are additional.
+- These are theoretical transport bounds and are not assumed to represent
+  billable inference calls.
+
+### Authorization boundary
+
+This approval authorizes exactly one migrated Chat Tier A invocation.
+
+It does not authorize:
+
+- Tier B;
+- the three-paper evaluator;
+- repeated Tier A attempts;
+- model-default promotion;
+- prompt changes;
+- SDK upgrades;
+- disabling TLS verification;
+- switching models or regions automatically.
+
+This approval is consumed when the Tier A command is executed, regardless of
+whether the test passes or fails.
+
 ## 7. Validation tiers
 
 ### 7.1 Tier A — provider connectivity smoke
