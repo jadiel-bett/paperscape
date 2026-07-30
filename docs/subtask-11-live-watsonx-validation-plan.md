@@ -761,6 +761,34 @@ using the recorded paper ID. The current frontend has no paper-history or
 automatic restoration feature, so Tier C must not claim automatic frontend
 history restoration.
 
+## Tier C ResearchMap Diagnostic Rerun Decision
+
+**Approved by:** Jadiel Bett  
+**Date:** 2026-07-30  
+**Status:** Approved for one invocation
+
+Approve one additional ResearchMap job using the already persisted extraction.
+
+Purpose:
+
+- identify only the safe validation issue codes produced by the initial and
+  corrective model outputs.
+
+Controls:
+
+- no PDF re-upload;
+- one job-creation request;
+- no prompt change;
+- no weakened validation;
+- no raw model output logging;
+- no source-text or excerpt logging;
+- no automatic or manual rerun after failure without review;
+- the existing single corrective generation call remains the only bounded
+  application retry.
+
+This approval is consumed when the job is submitted, whether it passes or
+fails.
+
 ## 8. Demo-paper selection and three-paper baseline
 
 ### 8.1 Required set
