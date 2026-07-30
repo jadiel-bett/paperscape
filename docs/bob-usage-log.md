@@ -803,7 +803,9 @@ from ibm_watsonx_ai.metanames import GenTextParamsMetaNames
   * `validate`
   * `max_retries`
 * `validate=False` prevents a model-list request during client construction
-* `max_retries=0` disables SDK-owned retry behavior
+* The initial review concluded that `max_retries=0` disabled SDK-owned retry
+  behavior; Sub-task 11 later corrected this because the pinned
+  `RetryTransport` remains active
 * `generate_text()` can declare return values other than `str`, so runtime response validation is required
 * Structured SDK request failures can expose an HTTP status through `exc.response.status_code`
 * Credential errors do not always expose a response object
@@ -818,8 +820,9 @@ The developer reviewed the Bob-generated plan and required:
 * Model response errors to use a separate `LLMResponseError`
 * Greedy decoding when `temperature == 0`
 * Sample decoding when `temperature > 0`
-* The IBM SDK retry system to be disabled
-* PaperScape to own a maximum of one retry
+* The IBM SDK response-decorator retry system to be disabled
+* PaperScape to own a maximum of one provider-level retry, while the pinned
+  transport layer remained separately active as later documented
 * Retry behavior based on an explicit status-code allowlist
 * Unknown HTTP status codes to default to non-transient
 * No exception classification based on parsing arbitrary error strings
@@ -950,9 +953,9 @@ Response-validation failures are never retried.
 
 ### Retry behavior
 
-PaperScape owns the retry loop.
+PaperScape owns its provider-level retry loop.
 
-The IBM SDK retry system is disabled with:
+The IBM SDK response-decorator retry layer is disabled with:
 
 ```text
 max_retries=0
@@ -1074,7 +1077,8 @@ Bob corrected the implementation so that:
 * `418` is not retried
 * `521` is not retried
 * Known transient failures retry once
-* At most two SDK calls are possible
+* At most two provider SDK method calls are possible; each can contain pinned
+  SDK transport retries
 * Reported test totals come directly from pytest collection
 
 ### 4. Tests and validation
@@ -1171,7 +1175,8 @@ The developer:
 * Required IBM Granite and watsonx.ai integration
 * Required actual SDK introspection before implementation
 * Selected `generate_text()`
-* Required one retry owner
+* Required one provider-level retry owner; later pinned-source inspection
+  distinguished the SDK transport retry layer
 * Defined explicit transient statuses
 * Required unknown statuses to fail without retry
 * Required credential and prompt safety
@@ -4156,3 +4161,100 @@ Sub-task 10 produced a reproducible two-container local environment and a determ
 Successful map generation remains available as an optional manual test when valid backend-only watsonx credentials are supplied.
 
 The default automated and credential-free workflows remain network-independent and safe.
+
+---
+
+## Sub-task 11A — Watsonx Chat API migration
+
+### Recorded Tier A result
+
+The first gated Tier A connectivity test used the explicit
+`ibm/granite-4-h-small` candidate in Frankfurt through the pinned SDK's
+deprecated `ModelInference.generate_text` path.
+
+IAM authentication, `WatsonxProvider` construction, and `ModelInference`
+construction succeeded. The inference request did not raise an HTTP access
+error. The SDK warned that `decoding_method` was ignored and that the
+text-generation endpoint is deprecated. It returned an empty string, so
+PaperScape raised `LLMResponseError` and Tier A failed safely.
+
+The one-invocation cost approval recorded by Jadiel Bett on 30 July 2026 was
+consumed by that test. It does not authorize another paid call. No credentials,
+project ID, IAM token, prompt, generated content, or raw SDK response was
+recorded.
+
+### Migration decision
+
+The developer approved a bounded migration that preserves:
+
+- `LLMProvider.generate(prompt, max_tokens, temperature) -> str`;
+- the existing ResearchMap prompt and generation limits;
+- the provider-owned transient retry;
+- ResearchMap's separate corrective call;
+- the application model default until migrated Tier A succeeds.
+
+`WatsonxProvider` now internally calls `ModelInference.chat` with the exact
+existing prompt as one user message. It maps `max_tokens` to
+`max_completion_tokens`, passes temperature exactly, and strictly validates the
+assistant role, refusal state, string content, non-empty content, and successful
+`stop` finish state. Raw Chat response values are never placed in provider
+errors or logs.
+
+JSON response format was not forced globally because the generic provider also
+serves non-JSON prompts. The existing ResearchMap prompt and Pydantic validation
+continue to enforce structured output.
+
+### TLS and retry correction
+
+Pinned `ibm-watsonx-ai==1.5.14` source inspection confirmed that
+`max_retries=0` disables only the `_with_retry` response-decorator layer. The
+separate `RetryTransport` remains configured for three retries, allowing up to
+four transport-loop iterations per Chat invocation.
+
+The provider now explicitly constructs credentials with `verify=True`. This
+preserves certificate validation and disables the pinned SDK's unverified SSL
+fallback. No SDK files were patched and no certificate error was suppressed.
+
+The revised theoretical raw inference bounds are:
+
+- four per Chat invocation;
+- eight for Tier A, including one provider transient retry;
+- sixteen for Tier B, including one ResearchMap corrective call.
+
+Authentication and provider-construction requests remain additional. These
+figures are theoretical bounds, not measured counts, approved paid ceilings, or
+necessarily billable requests. Unobservable attempts remain unknown rather than
+being reported as zero.
+
+### Authorization boundary
+
+Sub-task 11A implementation and offline verification do not authorize a paid
+Tier A rerun. A migrated Tier A call remains blocked until:
+
+- the implementation is independently audited;
+- all offline gates pass;
+- Lite-plan quota and Frankfurt availability are reconfirmed;
+- a new explicit decision accepts the Chat path's eight-request theoretical
+  inference bound plus additional authentication/construction traffic.
+
+Tier B, the live evaluator, and promotion of `ibm/granite-4-h-small` as the
+application default remain separately blocked.
+
+### Offline verification
+
+The completed migration passed:
+
+- 94 provider unit tests;
+- 67 ResearchMap unit tests;
+- 2 integration pipeline tests;
+- 454-test backend collection;
+- 453 backend tests with only the unauthorized Tier A test skipped;
+- the offline ResearchMap evaluation;
+- `pip check`;
+- frontend formatting with zero changes;
+- Flutter analysis with no issues;
+- 42 Flutter tests;
+- the Flutter Web release build.
+
+Both live gates remained absent. No live watsonx call occurred, no real provider
+was constructed, and no ignored credential file was inspected.

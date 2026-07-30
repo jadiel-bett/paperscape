@@ -51,9 +51,10 @@ The current implementation uses:
 
 - `ibm-watsonx-ai==1.5.14`;
 - `ModelInference`;
-- `generate_text`;
+- the Chat API through `ModelInference.chat`;
 - `validate=False`;
 - `max_retries=0`;
+- explicit `Credentials(verify=True)`;
 - a provider-owned maximum of two attempts for explicitly transient failures;
 - `max_tokens=1500` and `temperature=0.1` for ResearchMap generation;
 - at most one ResearchMap corrective generation call.
@@ -76,15 +77,36 @@ Pinned `ibm-watsonx-ai==1.5.14` source inspection establishes that:
 - the pinned SDK separately creates a `RetryTransport`;
 - `RetryTransport` is configured with `retries=3`;
 - that transport retries statuses including `401`, `500`, `502`, `503`, `504`,
-  `520`, `521`, and `524`.
+  `520`, `521`, and `524`;
+- explicit `verify=True` disables the pinned transport's unverified SSL
+  fallback while preserving certificate verification.
 
-The current PaperScape comments claiming that provider construction can occur
-without a live network and that `max_retries=0` disables all SDK retrying are
-inaccurate for the pinned SDK. Do not change production provider documentation
-during this planning correction. Plan a later bounded documentation correction
-to `backend/app/services/llm_provider.py` only after the SDK-client construction
-and paid-attempt decision in Section 6 is explicitly approved. Any corrected
-statement must remain scoped to the pinned SDK and tested path.
+The inaccurate provider comments about network-free construction and sole retry
+ownership were corrected as part of Sub-task 11A.
+
+### 2.1.1 First Tier A result and Chat migration
+
+The first Tier A run used the explicit `ibm/granite-4-h-small` candidate in
+Frankfurt through `ModelInference.generate_text`. IAM authentication and
+provider/SDK client construction succeeded. The request did not raise an HTTP
+access error, but the SDK warned that `decoding_method` was ignored and that the
+text-generation endpoint is deprecated. The SDK returned an empty string and
+PaperScape raised `LLMResponseError`.
+
+That Tier A run failed and consumed the one-invocation approval recorded by
+Jadiel Bett on 30 July 2026. It did not authorize a rerun.
+
+Sub-task 11A therefore migrated the provider internally to
+`ModelInference.chat` while preserving `LLMProvider.generate(...) -> str`. The
+exact existing prompt is sent as one user message, `max_tokens` maps to
+`max_completion_tokens`, temperature is passed exactly, and assistant content
+is strictly validated. The application model default remains unchanged.
+
+Offline verification after the migration collected 454 backend tests: 453
+passed and the gated Tier A test was the only skip. Provider tests (94),
+ResearchMap tests (67), integration tests (2), the offline evaluation,
+dependency check, frontend format/analysis, 42 Flutter tests, and the Flutter
+Web release build passed. No live call occurred.
 
 ### 2.2 Current configuration
 
@@ -155,9 +177,9 @@ Use this mandatory sequence:
    GRANITE_MODEL_ID=ibm/granite-4-h-small
    ```
 
-3. Prove that the existing pinned SDK, `ModelInference` construction,
-   `generate_text` method, credentials, project, endpoint, generation
-   parameters, and candidate model work together.
+3. Prove that the existing pinned SDK, `ModelInference` construction, Chat API,
+   credentials, project, endpoint, Chat parameters, and candidate model work
+   together.
 4. Only after Tier A succeeds, promote the application default to:
 
    ```text
@@ -170,13 +192,12 @@ Use this mandatory sequence:
    after the default change.
 7. Proceed to Tier B only after those offline gates pass.
 
-If Tier A shows that the candidate model cannot use the existing text-generation
-path, stop and record the blocker. Do not automatically:
+If Tier A shows that the candidate model cannot use the migrated Chat path, stop
+and record the blocker. Do not automatically:
 
 - choose another model;
 - switch regions;
 - upgrade the SDK;
-- migrate to the Chat API;
 - change the `LLMProvider` interface;
 - change `ResearchMapService`;
 - change the prompt;
@@ -204,8 +225,8 @@ baseline even if it belongs to the same IBM Cloud account.
 
 `ibm/granite-4-h-small` is currently listed for provided pay-per-token inference
 in Frankfurt. This listing is necessary but not sufficient: Tier A must still
-prove PaperScape project entitlement and `generate_text` compatibility through
-the Frankfurt endpoint.
+prove PaperScape project entitlement and migrated Chat compatibility through the
+Frankfurt endpoint.
 
 Actual latency from Kenya must be measured during validation rather than
 assumed from geographic proximity or region labels.
@@ -395,49 +416,42 @@ The pinned SDK has two distinct retry mechanisms:
    including `401`, `500`, `502`, `503`, `504`, `520`, `521`, and `524`.
 
 `RetryTransport` runs up to `retries + 1` retry-loop iterations. With
-`retries=3`, this means up to four loop iterations. Ordinarily, each iteration
-issues one HTTP transport request.
+`retries=3`, this means up to four loop iterations and four raw inference
+transport requests per Chat invocation.
 
-Four loop iterations are not an unconditional four-request bound. When SSL
-fallback is eligible, an iteration can issue:
+Sub-task 11A explicitly constructs credentials with `verify=True`. In the pinned
+SDK this preserves certificate verification and makes SSL fallback ineligible.
+A certificate error therefore fails safely and cannot add an unverified raw
+request.
 
-1. the original request; and
-2. one fallback request after transport reinitialization.
+PaperScape's `WatsonxProvider` may invoke `chat` twice because it owns one
+transient retry. `ResearchMapService` may call the provider twice because it owns
+one corrective generation call.
 
-PaperScape currently creates `Credentials` without an explicit `verify` value,
-so the SDK default may permit this SSL-fallback path. One `generate_text`
-invocation can therefore perform up to four retry-loop iterations and up to five
-raw inference transport requests when the one possible SSL-fallback request is
-included.
+### 6.2 Theoretical upper bounds after the Chat migration
 
-PaperScape's `WatsonxProvider` may invoke `generate_text` twice because it owns
-one transient retry. `ResearchMapService` may call the provider twice because it
-owns one corrective generation call.
-
-### 6.2 Theoretical upper bounds before an SDK-level decision
-
-Per `generate_text` invocation:
+Per `chat` invocation:
 
 - up to four SDK retry-loop iterations;
-- up to five raw inference transport requests, including one possible
-  SSL-fallback request.
+- up to four raw inference transport requests;
+- no SSL-fallback request.
 
 Tier A:
 
 - exactly one provider service call;
-- up to two `generate_text` invocations because PaperScape owns one transient
+- up to two `chat` invocations because PaperScape owns one transient
   retry;
 - up to eight SDK retry-loop iterations;
-- up to ten raw inference transport requests;
+- up to eight raw inference transport requests;
 - authentication and provider-construction requests are additional.
 
 Tier B:
 
 - up to two ResearchMap service calls because the service owns one corrective
   generation call;
-- up to two provider `generate_text` invocations per service call;
+- up to two provider `chat` invocations per service call;
 - up to sixteen SDK retry-loop iterations;
-- up to twenty raw inference transport requests;
+- up to sixteen raw inference transport requests;
 - authentication and provider-construction requests are additional.
 
 These are conservative theoretical bounds in the current pinned path, not
@@ -445,7 +459,7 @@ approved paid-call ceilings. A TLS failure may not reach the inference service
 and is therefore not necessarily a billable inference. Tier A execution must not
 proceed merely because the live harness exists.
 
-Before Tier A execution, explicitly approve one of these decisions:
+Before another Tier A execution, explicitly approve the migrated Chat path.
 
 **Decision A — bounded SDK-client construction**
 
@@ -476,15 +490,18 @@ The bounded strategy must:
 - produce measurable request ceilings;
 - receive explicit approval before paid execution.
 
-**Decision B — accept the pinned ceiling**
+**Decision B — accept the pinned Chat ceiling**
 
-Explicitly accept the pinned SDK's larger retry and SSL-fallback risk, document
-the theoretical ten-raw-request Tier A bound, review quota and billing, and
-approve the cost risk before executing Tier A.
+Explicitly accept the pinned SDK's transport retry risk, document the theoretical
+eight-raw-request Tier A bound plus additional authentication/construction
+requests, review quota and billing, and approve the cost risk before executing
+Tier A.
 
-Do not patch installed site-packages. Do not modify the production provider
-during this planning correction. Any production change requires its own bounded,
-tested implementation after the selected decision is approved.
+The previous Decision B approved one text-generation Tier A invocation with a
+ten-request bound. That invocation was executed, failed, and consumed the
+approval. It does not authorize the migrated Chat Tier A.
+
+Do not patch installed site-packages or weaken TLS verification.
 
 ### 6.3 Observability requirements
 
@@ -520,8 +537,10 @@ failures.
 Purpose: prove that the current provider path can invoke the explicitly selected
 candidate without modifying application data.
 
-Creating a Tier A-only harness does not authorize its execution. Tier A remains
-blocked until Decision A or Decision B in Section 6 is explicitly approved.
+Creating a Tier A-only harness and implementing the Chat migration do not
+authorize another paid execution. Tier A remains blocked until the migrated
+Chat path is audited, offline gates pass, and a new Decision B in Section 6 is
+explicitly approved.
 
 Required behavior:
 
@@ -534,7 +553,7 @@ Required behavior:
 5. Construct the real `WatsonxProvider`.
 6. Submit one harmless prompt unrelated to application or paper data.
 7. Use `max_tokens=32` and `temperature=0`, which the current provider maps to
-   greedy decoding with `max_new_tokens=32` and no temperature field.
+   `max_completion_tokens=32` and `temperature=0` exactly.
 8. Assert that a non-empty string is returned.
 9. Record only sanitized, actually observable metrics.
 
@@ -546,9 +565,9 @@ Tier A must prove:
 - the PaperScape project is entitled to access the candidate model in
   Frankfurt;
 - the installed SDK can construct the client;
-- `generate_text` works with the candidate model;
-- the current parameter shape is accepted;
-- SDK response parsing returns a usable string;
+- `ModelInference.chat` works with the candidate model;
+- the migrated Chat parameter shape is accepted;
+- strict assistant response parsing returns a usable string;
 - retry ceilings are respected;
 - no secret is logged.
 
@@ -1073,14 +1092,15 @@ docs/bob-usage-log.md
 ```
 
 Stage 2 may add the Tier B live test and evaluator, promote the model default,
-update the config assertion, correct verified provider documentation, and update
-environment examples and affected documentation. Run all offline regressions
-after these changes and before executing Tier B.
+update the config assertion, and update environment examples and affected
+documentation. The provider documentation correction and Chat migration were
+completed separately in Sub-task 11A. Run all offline regressions after Stage 2
+changes and before executing Tier B.
 
-The later documentation correction must also fix stale wording in
-`docs/vertical-slice-plan.md` that currently says:
+Sub-task 11A must also fix stale wording in `docs/vertical-slice-plan.md` that
+said:
 
-- the provider calls `ModelInference.generate` rather than `generate_text`;
+- the provider calls `ModelInference.generate`;
 - required watsonx credentials are validated at startup.
 
 ### 14.3 Explicitly unchanged
@@ -1213,9 +1233,9 @@ Do not use `docker compose down -v` during validation.
 - Require explicit candidate-model override for Tier A.
 - Use a 32-token Tier A output ceiling.
 - Preserve the current 1500-token ResearchMap ceiling.
-- Resolve the Section 6 `RetryTransport`, SSL-fallback, authentication, and
-  attempt-accounting decision before Tier A execution.
-- Treat ten raw inference transport requests for Tier A and twenty for Tier B,
+- Reconfirm the Section 6 `RetryTransport`, authentication, and
+  attempt-accounting decision before another Tier A execution.
+- Treat eight raw inference transport requests for Tier A and sixteen for Tier B,
   excluding authentication/construction requests, as conservative theoretical
   bounds rather than approved paid ceilings.
 - Count service calls, retry-loop iterations, raw transport requests, transport
@@ -1256,20 +1276,20 @@ Do not use `docker compose down -v` during validation.
 | Risk | Mitigation |
 |---|---|
 | Current default is withdrawn | Use only an explicit Granite 4 override for Tier A; promote the default after success. |
-| Candidate model lacks `generate_text` compatibility | Stop and require a provider-migration decision. |
+| Candidate model lacks migrated Chat compatibility | Stop and require a new provider decision. |
 | Candidate model is unavailable to the project | Confirm Resource Hub/Prompt Lab access, then stop on Tier A failure. |
 | Frankfurt project, Runtime, and endpoint regions differ | Create both the project and Lite Runtime in Frankfurt and use `https://eu-de.ml.cloud.ibm.com`; do not infer region from UUID. |
 | A Frankfurt call fails | Classify and verify whether the blocker is Frankfurt-specific; do not automatically switch regions. Dallas requires a separate, evidence-backed fallback decision. |
 | Kenya latency is assumed rather than measured | Record actual construction, inference, and workflow latency from Kenya during the approved live validation. |
 | SDK performs construction requests | Pinned source confirms authentication during construction; gate every import/construction path and instrument authentication separately where approved. |
-| Hidden SDK retries or SSL fallback increase requests | Four retry-loop iterations can produce five raw transport requests; Tier A and Tier B conservative bounds are ten and twenty respectively, excluding authentication/construction requests. Tier A remains blocked until Decision A or Decision B is approved. |
-| Cost bounding weakens TLS security | Decision A must preserve certificate validation and may not use `verify=False`, suppress certificate errors, patch site-packages, silently replace transport, or reduce security controls. |
+| Hidden SDK transport retries increase requests | Four retry-loop iterations can produce four raw inference requests per Chat invocation; Tier A and Tier B conservative bounds are eight and sixteen respectively, excluding authentication/construction requests. Another Tier A remains blocked pending audit, offline gates, and a new cost decision. |
+| Cost bounding weakens TLS security | Credentials explicitly use `verify=True`; never use `verify=False`, suppress certificate errors, patch site-packages, silently replace transport, or reduce security controls. |
 | JSON or grounding fails | Allow the existing single corrective call; do not weaken validation. |
 | One paper drives prompt overfitting | Classify failures first and require multi-paper evidence before prompt work. |
 | UI polling reaches its two-minute timeout | Record the visible failure; do not silently change timeouts. |
 | Generated excerpts create redistribution concerns | Keep output local until licence and excerpt policy review. |
 | Secrets appear in diagnostics | Emit booleans and sanitized codes only; never print raw matches. |
-| Text-generation API is removed later | Record the 14 March 2027 deadline and plan migration separately. |
+| Deprecated text-generation API is removed later | Sub-task 11A removes the production dependency; preserve the recorded 14 March 2027 lifecycle evidence. |
 
 ## 18. Rollback strategy
 
@@ -1298,11 +1318,10 @@ attempts are therefore mandatory before execution.
 3. Verify ordinary collection and pytest execution skip Tier A before Settings
    or provider construction and perform zero network calls.
 4. Record actual collected, passed, and skipped totals.
-5. Choose and explicitly approve Decision A or Decision B from Section 6.
-   Decision A must preserve TLS certificate validation while bounding
-   `RetryTransport`, SSL fallback, authentication, and measurable request
-   counts. Decision B must explicitly accept the conservative ten-request Tier A
-   bound and associated quota/billing risk.
+5. Audit Sub-task 11A, pass all offline gates, and explicitly approve the
+   migrated Chat Decision B from Section 6. The new decision must accept the
+   conservative eight-request Tier A bound plus additional authentication and
+   construction traffic.
 6. Confirm credentials, the Frankfurt project, the Frankfurt Lite Runtime
    association, the `eu-de` endpoint, model visibility, project entitlement,
    permission, quota, billing readiness, and the approved attempt ceiling
@@ -1336,22 +1355,19 @@ Sub-task 11 is complete only when:
 - Stage 1 remained limited to authorization helpers, offline gate tests, the
   Tier A-only test, manifest/ignore scaffolding, and paper-selection
   documentation.
-- Decision A or Decision B for pinned `RetryTransport`, SSL-fallback,
-  authentication, and paid-request ceilings was explicitly approved before Tier
-  A execution.
-- Decision A, if selected, preserved normal TLS certificate validation and did
-  not use `verify=False`, suppressed certificate errors, patched site-packages,
-  silent transport replacement, or reduced security controls.
-- Decision B, if selected, explicitly accepted the conservative ten-raw-request
-  Tier A bound and associated quota/billing risk.
+- The migrated provider explicitly preserved TLS certificate verification and
+  disabled the pinned SDK's unverified SSL fallback.
+- A new Chat-path Decision B explicitly accepted the conservative
+  eight-raw-request Tier A bound, additional authentication/construction
+  traffic, and associated quota/billing risk before another paid execution.
 - Tier A succeeds with `ibm/granite-4-h-small` supplied as an explicit process
   override.
 - The PaperScape project and associated Lite-plan watsonx.ai Runtime were both
   created in Frankfurt (`eu-de`) and validation used
   `https://eu-de.ml.cloud.ibm.com`.
-- The pinned SDK, `ModelInference`, `generate_text`, project, endpoint, current
+- The pinned SDK, `ModelInference`, Chat API, project, endpoint, migrated
   parameters, and candidate model are proven compatible together.
-- Tier A proves project entitlement and `generate_text` compatibility in
+- Tier A proves project entitlement and Chat compatibility in
   Frankfurt.
 - The application default is promoted only after Tier A succeeds.
 - All existing backend tests continue passing after the promotion.
@@ -1372,8 +1388,8 @@ Sub-task 11 is complete only when:
   requests are recorded.
 - Unobservable SDK, SSL-fallback, or authentication request counts are recorded
   as unknown, never zero.
-- The conservative theoretical raw-request bounds are recorded as ten for Tier A
-  and twenty for Tier B, excluding authentication/provider-construction
+- The conservative theoretical raw-request bounds are recorded as eight for
+  Tier A and sixteen for Tier B, excluding authentication/provider-construction
   requests; they are not represented as approved paid-call ceilings.
 - Actual latency from Kenya and final job status are recorded.
 - Dallas is used only after a verified Frankfurt-specific compatibility blocker
@@ -1387,8 +1403,8 @@ Sub-task 11 is complete only when:
 - Complete live maps remain uncommitted unless licence and excerpt policy are
   approved.
 - The evaluator independently requires both live gates and `--ack-charges`.
-- The text-generation API migration risk and 14 March 2027 removal date are
-  recorded.
+- The completed Chat migration and the text-generation API's 14 March 2027
+  removal date are recorded.
 - Failures remain safe and readable.
 
 ## 21. Final status
@@ -1397,21 +1413,22 @@ Sub-task 11 is complete only when:
 2. A successful real watsonx run remains a vertical-slice gap.
 3. Real watsonx compatibility remains unproven.
 4. Provider construction performs network authentication in the pinned SDK.
-5. Hidden SDK `RetryTransport` retries and SSL fallback invalidate the original
-   four-request bound.
-6. Pre-Tier-A harness implementation may proceed only after this corrected plan
-   is approved and remains limited to the Stage 1 files and behaviors.
-7. Paid Tier A execution requires a separate, explicit `RetryTransport`,
-   SSL-fallback, authentication, attempt-accounting, and cost-control decision.
-8. The current conservative theoretical bounds are ten raw inference transport
-   requests for Tier A and twenty for Tier B, excluding authentication and
-   provider-construction requests.
-9. Decision A may not weaken normal TLS certificate verification.
+5. The migrated provider explicitly enables certificate verification, disabling
+   the pinned SDK's unverified SSL fallback.
+6. Sub-task 11A replaces the deprecated production text-generation request with
+   `ModelInference.chat` while preserving the public provider interface.
+7. Another paid Tier A requires migration audit, passing offline gates, and a
+   new explicit Chat-path retry, authentication, attempt-accounting, and
+   cost-control decision.
+8. The current conservative theoretical bounds are eight raw inference
+   transport requests for Tier A and sixteen for Tier B, excluding
+   authentication and provider-construction requests.
+9. TLS certificate verification may not be weakened.
 10. Frankfurt (`eu-de`) is selected with
     `https://eu-de.ml.cloud.ibm.com`; the PaperScape project and associated
     Lite-plan Runtime must both be created there.
-11. Credential readiness, project entitlement, candidate-model access, and
-    `generate_text` compatibility remain live prerequisites.
+11. Credential readiness, project entitlement, candidate-model access, and Chat
+    compatibility remain live prerequisites.
 12. Actual latency from Kenya must be measured rather than assumed.
 13. Dallas is a fallback only for a verified Frankfurt-specific compatibility
     blocker, and a failed call must never switch regions automatically.

@@ -12,16 +12,18 @@ Architecture rules
 Verified SDK notes — ibm-watsonx-ai==1.5.14
 --------------------------------------------
 - ``ModelInference`` accepts ``validate=False`` to skip the construction-time
-  model-list API call.  Invalid model IDs are detected on the first generation
-  call instead.  Pass ``validate=False`` so the provider can be constructed
-  without a live network connection (required for tests and startup latency).
-- ``max_retries=0`` disables the SDK's built-in ``@_with_retry`` decorator,
-  which would otherwise perform up to 10 retries on [429, 503, 504, 520].
-  The provider owns all retry logic instead.
-- ``generate_text()`` is declared as returning ``str | list[str | dict] | dict``
-  so runtime type validation is required before returning.
-- ``GenTextParamsMetaNames`` (not the ``TextGenParameters`` dataclass) is the
-  correct constants namespace for building the params dict.
+  model-list API call only.  APIClient construction and token acquisition can
+  still perform network requests, so provider construction is network-active.
+- ``max_retries=0`` disables the SDK's ``@_with_retry`` response-decorator
+  layer.  It does not disable the separate ``RetryTransport``, which is pinned
+  to three retries (up to four transport-loop iterations).
+- ``ModelInference.chat()`` returns an untyped dictionary.  PaperScape must
+  validate the assistant message before returning content to callers.
+- ``GenChatParamsMetaNames`` provides ``max_completion_tokens`` and
+  ``temperature``.  Chat does not accept the text-generation-only
+  ``decoding_method`` or ``max_new_tokens`` fields.
+- Credentials explicitly use ``verify=True``.  In this pinned SDK that
+  preserves certificate verification and disables its unverified SSL fallback.
 - Status codes are accessed via ``exc.response.status_code`` on
   ``ApiRequestFailure`` and its subclasses.  ``InvalidCredentialsError``
   descends from ``WMLClientError`` directly and has no ``.response``.
@@ -73,10 +75,11 @@ class NonTransientLLMError(LLMProviderError):
 
 
 class LLMResponseError(LLMProviderError):
-    """The provider returned no usable generated text.
+    """The provider returned no usable assistant text.
 
-    Raised for non-string output, empty output, or whitespace-only output.
-    Not retried — these indicate a content failure, not a network failure.
+    Raised for a malformed Chat response, refusal, incomplete finish state, or
+    empty/non-string assistant content.  Not retried because these indicate a
+    response failure rather than a network failure.
     """
 
 
@@ -109,8 +112,8 @@ class LLMProvider(ABC):
         max_tokens:
             Maximum number of tokens to generate.  Must be at least 1.
         temperature:
-            Sampling temperature in ``[0.0, 2.0]``.  Use ``0.0`` for
-            greedy (deterministic) decoding; positive values for sampling.
+            Sampling temperature in ``[0.0, 2.0]``.  ``0.0`` is the Chat API's
+            closest greedy-equivalent setting; positive values enable sampling.
 
         Raises
         ------
@@ -118,7 +121,8 @@ class LLMProvider(ABC):
             If *prompt* is blank, *max_tokens* < 1, or *temperature* is
             outside ``[0.0, 2.0]``.
         LLMResponseError
-            If the model returns empty, whitespace-only, or non-string output.
+            If the Chat response is malformed, refused, incomplete, or has no
+            usable assistant content.
         TransientLLMError
             On retryable network or server failures (after one retry).
         NonTransientLLMError
@@ -139,9 +143,9 @@ class _SdkClientFactory:
     Separated from ``WatsonxProvider`` so unit tests can substitute a
     ``FakeSdkClientFactory`` without patching module-level imports.
 
-    ``validate=False`` is always passed to avoid a live model-list API call
-    at construction time.  ``max_retries=0`` disables SDK-level retries so
-    ``WatsonxProvider`` is the sole retry owner.
+    ``validate=False`` skips model-spec validation only; APIClient construction
+    can still authenticate over the network. ``max_retries=0`` disables the
+    SDK response-decorator retry layer but not its separate RetryTransport.
     """
 
     def build(
@@ -157,8 +161,8 @@ class _SdkClientFactory:
             model_id=model_id,
             credentials=credentials,
             project_id=project_id,
-            validate=False,   # skip construction-time model-list fetch
-            max_retries=0,    # provider owns all retries
+            validate=False,  # skip model-spec validation only
+            max_retries=0,  # disable response-decorator retries only
         )
 
 
@@ -178,11 +182,12 @@ class WatsonxProvider(LLMProvider):
 
     Retry behaviour
     ---------------
-    At most two total attempts.  A transient failure on the first attempt
-    triggers ``_sleep(1.0)`` then a second attempt.  A second transient
-    failure raises ``TransientLLMError``.  Non-transient failures and
-    response errors raise immediately without retrying.
-    SDK-level retries are disabled (``max_retries=0``).
+    At most two provider-level Chat invocations.  A transient failure on the
+    first invocation triggers ``_sleep(1.0)`` then a second invocation.  A
+    second transient failure raises ``TransientLLMError``.  Non-transient
+    failures and response errors raise immediately without a provider retry.
+    The pinned SDK's separate RetryTransport remains active even though
+    response-decorator retries are disabled with ``max_retries=0``.
     """
 
     def __init__(
@@ -200,6 +205,7 @@ class WatsonxProvider(LLMProvider):
         credentials = Credentials(
             url=settings.watsonx_url,
             api_key=settings.watsonx_api_key.get_secret_value(),
+            verify=True,
             # raw key used only here; not stored as an attribute
         )
         self._client = factory.build(
@@ -260,20 +266,14 @@ class WatsonxProvider(LLMProvider):
     # ------------------------------------------------------------------
 
     def _call_sdk(self, prompt: str, params: dict) -> str:
-        """Call ``generate_text``, classify exceptions, validate the result."""
+        """Call Chat, classify SDK exceptions, and validate assistant content."""
+        messages = [{"role": "user", "content": prompt}]
         try:
-            result = self._client.generate_text(prompt=prompt, params=params)
+            result = self._client.chat(messages=messages, params=params)
         except Exception as exc:
             raise _classify_exception(exc) from exc
 
-        if not isinstance(result, str):
-            raise LLMResponseError(
-                f"generate_text returned unexpected type: {type(result).__name__}"
-            )
-        stripped = result.strip()
-        if not stripped:
-            raise LLMResponseError("generate_text returned empty generated text")
-        return stripped
+        return _extract_chat_content(result)
 
 
 # ---------------------------------------------------------------------------
@@ -282,23 +282,54 @@ class WatsonxProvider(LLMProvider):
 
 
 def _build_params(*, max_tokens: int, temperature: float) -> dict:
-    """Return the SDK generation params dict for the given arguments.
+    """Return the pinned SDK Chat parameters for the public provider inputs."""
+    from ibm_watsonx_ai.metanames import GenChatParamsMetaNames as GenParams
 
-    Temperature is omitted from the params dict when greedy decoding is used
-    because IBM documents that temperature does not apply to greedy decoding.
-    """
-    from ibm_watsonx_ai.metanames import GenTextParamsMetaNames as GenParams
-
-    if temperature == 0.0:
-        return {
-            GenParams.DECODING_METHOD: "greedy",
-            GenParams.MAX_NEW_TOKENS: max_tokens,
-        }
     return {
-        GenParams.DECODING_METHOD: "sample",
-        GenParams.MAX_NEW_TOKENS: max_tokens,
+        GenParams.MAX_COMPLETION_TOKENS: max_tokens,
         GenParams.TEMPERATURE: temperature,
     }
+
+
+def _extract_chat_content(response: object) -> str:
+    """Return validated assistant content without exposing raw response values."""
+    if not isinstance(response, dict):
+        raise LLMResponseError("chat_response_not_object")
+
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise LLMResponseError("chat_response_choices_invalid")
+
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise LLMResponseError("chat_response_choice_invalid")
+
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise LLMResponseError("chat_response_message_invalid")
+    if message.get("role") != "assistant":
+        raise LLMResponseError("chat_response_role_invalid")
+
+    if choice.get("refusal") or message.get("refusal"):
+        raise LLMResponseError("chat_response_refused")
+
+    if "content" not in message:
+        raise LLMResponseError("chat_response_content_missing")
+    content = message["content"]
+    if not isinstance(content, str):
+        raise LLMResponseError("chat_response_content_not_string")
+
+    stripped = content.strip()
+    if not stripped:
+        raise LLMResponseError("chat_response_content_empty")
+
+    finish_reason = choice.get("finish_reason")
+    if not isinstance(finish_reason, str):
+        raise LLMResponseError("chat_response_finish_reason_invalid")
+    if finish_reason != "stop":
+        raise LLMResponseError("chat_response_finish_not_stop")
+
+    return stripped
 
 
 # ---------------------------------------------------------------------------

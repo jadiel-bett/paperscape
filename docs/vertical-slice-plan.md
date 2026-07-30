@@ -354,10 +354,17 @@ class LLMProvider(ABC):
 
 **WatsonxProvider (concrete):**
 - Constructed from a `Settings` object.
-- Calls `ibm-watsonx-ai` SDK's `ModelInference.generate()`.
-- Returns raw text string from the model response.
-- Raises `LLMProviderError` on HTTP failure, timeout, or empty response.
-- One exponential-backoff retry on transient failures.
+- Preserves the public `generate()` interface while internally calling the
+  pinned SDK's `ModelInference.chat()` with one exact user message.
+- Maps `max_tokens` to `max_completion_tokens` and passes temperature exactly.
+- Strictly validates an assistant message, content, and successful finish state
+  before returning a string.
+- Raises `LLMProviderError` on HTTP failure, timeout, or invalid Chat response.
+- Performs one application-owned retry on explicitly transient failures. The
+  pinned SDK's separate `RetryTransport` can perform up to four transport-loop
+  iterations per Chat invocation.
+- Explicitly enables TLS certificate verification and disables the pinned SDK's
+  unverified SSL fallback.
 
 **Rules:**
 - No FastAPI imports.
@@ -563,7 +570,7 @@ procedure.
 |---|---|---|
 | Docling fails to install in Docker due to native deps | Medium | `EXTRACTION_BACKEND=pymupdf` env flag bypasses Docling entirely |
 | Granite returns malformed JSON | Medium | One retry with corrective prompt fragment; `MapGenerationError` and job `failed` after two attempts |
-| watsonx credentials wrong at startup | Low | `config.py` validates required fields; app fails to start with descriptive error |
+| watsonx credentials missing or wrong when generation starts | Low | Upload remains available; job creation or lazy provider construction fails with a sanitized application error |
 | BackgroundTasks thread crash leaves job in `running` state | Low | On startup, `database.py` migration resets any `running` jobs to `failed` with error `"server_restart"` |
 | Flutter polling hammers backend | Low | 1.5 s polling interval with exponential back-off after 5 consecutive non-terminal responses |
 | Flutter web file picker platform quirks | Low | Use `file_picker` package (stable web support); tested in Chrome |
@@ -709,8 +716,9 @@ The vertical slice is complete when ALL of the following are true:
   services type-hint against the interface, not the SDK.
 - **Expected Outcomes:**
   - `LLMProvider` ABC is importable as a type.
-  - `WatsonxProvider.generate()` calls the SDK with correct params and returns
-    a string.
+  - `WatsonxProvider.generate()` calls `ModelInference.chat()` with the correct
+    message and parameters, validates the assistant response, and returns a
+    string.
   - Transient SDK failure triggers one retry; persistent failure raises
     `LLMProviderError`.
   - `test_llm_provider.py` passes with mocked `ModelInference`.
