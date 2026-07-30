@@ -4317,3 +4317,28 @@ Both live gates remained absent during verification. No live watsonx call
 occurred, no credential was inspected, and Tier B still requires a separate
 paid-run decision. No evaluator, Tier C automation, prompt, frontend source,
 Compose, database, or job-orchestration change was added.
+
+### Execution record
+
+- Executed on: 2026-07-30
+- Outcome: passed
+- Test: `test_live_research_map_service`
+- Selection: `-k research_map_service`
+- Model: `ibm/granite-4-h-small`
+- Region: Frankfurt (`eu-de`)
+- Result: `1 passed, 1 deselected`
+- Execution time: `11.60s`
+- Automatic or manual rerun: no
+- Generated ResearchMap persisted or printed: no
+- Credentials, project identifiers, prompts, and raw responses recorded: no
+- Approval status: consumed
+
+### Tier B conclusion
+
+The real watsonx Chat provider successfully generated a ResearchMap that passed
+the existing PaperScape schema and evidence-grounding validation against the
+controlled extraction fixture.
+
+This authorizes preparation of one manually controlled Tier C browser workflow
+using an approved open-access PDF. It does not authorize repeated Tier B calls,
+the three-paper evaluator, or unrelated paid model testing.
