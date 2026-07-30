@@ -253,10 +253,15 @@ def test_missing_extraction_marks_failed(
 
 
 def test_map_generation_error_marks_failed(
+    caplog: pytest.LogCaptureFixture,
     job_store: JobStore,
     extraction_store: ExtractionStore,
     research_map_store: ResearchMapStore,
 ) -> None:
+    caplog.set_level(
+        logging.ERROR,
+        logger="app.services.research_map_job_runner",
+    )
     paper_id = "p-map-err"
     extraction = _make_sample_extraction(paper_id)
     extraction_store.save(extraction)
@@ -272,6 +277,73 @@ def test_map_generation_error_marks_failed(
     assert final is not None
     assert final.status == JobStatus.FAILED
     assert final.error == "map_generation_failed"
+    assert (
+        "Research map generation failed: issue_codes=['UNKNOWN']"
+        in caplog.messages
+    )
+
+
+def test_map_generation_error_logs_only_safe_sorted_issue_codes(
+    caplog: pytest.LogCaptureFixture,
+    job_store: JobStore,
+    extraction_store: ExtractionStore,
+    research_map_store: ResearchMapStore,
+) -> None:
+    caplog.set_level(
+        logging.DEBUG,
+        logger="app.services.research_map_job_runner",
+    )
+    chunk_sentinel = "SENTINEL_PAPER_CHUNK_TEXT"
+    extraction = ExtractionResult(
+        paper_id="p-safe-diagnostic",
+        filename="test.pdf",
+        chunks=[
+            Chunk(
+                chunk_id="p-safe-diagnostic-p1-1",
+                page=1,
+                text=chunk_sentinel,
+                section="Results",
+            )
+        ],
+    )
+    extraction_store.save(extraction)
+
+    failure = MapGenerationError(
+        "SENTINEL_PROMPT_TEXT SENTINEL_MODEL_OUTPUT",
+        issue_codes={
+            "PAGE_MISMATCH",
+            "INVALID_JSON",
+            "SENTINEL_UNSAFE_ISSUE_CODE",
+        },
+    )
+    failure.__cause__ = ValueError("SENTINEL_CHAINED_EXCEPTION")
+    failing_service = MagicMock(spec=ResearchMapService)
+    failing_service.generate_map.side_effect = failure
+
+    job = job_store.create(extraction.paper_id)
+    runner = _create_runner(
+        job_store,
+        extraction_store,
+        research_map_store,
+        failing_service,
+    )
+    runner.run(job.job_id)
+
+    final = job_store.get(job.job_id)
+    assert final is not None
+    assert final.status == JobStatus.FAILED
+    assert final.error == "map_generation_failed"
+    assert (
+        "Research map generation failed: "
+        "issue_codes=['INVALID_JSON', 'PAGE_MISMATCH']"
+        in caplog.messages
+    )
+    complete_log = caplog.text
+    assert "SENTINEL_PROMPT_TEXT" not in complete_log
+    assert "SENTINEL_MODEL_OUTPUT" not in complete_log
+    assert chunk_sentinel not in complete_log
+    assert "SENTINEL_CHAINED_EXCEPTION" not in complete_log
+    assert "SENTINEL_UNSAFE_ISSUE_CODE" not in complete_log
 
 
 def test_llm_provider_error_marks_failed(

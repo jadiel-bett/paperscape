@@ -1612,3 +1612,16 @@ Sub-task 11 is complete only when:
      blocker, and a failed call must never switch regions automatically.
 16. Audience adaptation begins only after Tier A, Tier B, Tier C, and the
      three-paper scorecard succeed.
+
+## 22. Tier C diagnostic preparation
+
+The approved real nine-page selectable-text PDF extracted successfully with
+`page_count=9` and `chunk_count=148`. The first real background ResearchMap job
+then failed safely with `map_generation_failed`; the exact schema or grounding
+validation causes were not observable.
+
+Deadline-bounded diagnostics now preserve and log only allowlisted, sorted
+ResearchMap validation issue-code names for the initial and corrective attempts.
+The job runner records the same safe codes while continuing to persist only
+`map_generation_failed`. No prompt or validation rule changed, and no paid
+diagnostic rerun has occurred.

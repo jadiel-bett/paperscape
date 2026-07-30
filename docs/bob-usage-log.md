@@ -4342,3 +4342,18 @@ controlled extraction fixture.
 This authorizes preparation of one manually controlled Tier C browser workflow
 using an approved open-access PDF. It does not authorize repeated Tier B calls,
 the three-paper evaluator, or unrelated paid model testing.
+
+---
+
+## Sub-task 11 Tier C — diagnostic preparation
+
+The real nine-page selectable-text PDF extracted successfully with
+`page_count=9` and `chunk_count=148`. The first real background ResearchMap job
+failed safely with `map_generation_failed`, but the exact validation causes were
+not observable.
+
+Safe diagnostics were added to preserve and log only allowlisted, sorted
+ResearchMap validation issue-code names across the initial attempt, corrective
+attempt, and background runner boundary. The persisted/public job error remains
+`map_generation_failed`. No prompt or validation rule was changed, and a paid
+diagnostic rerun has not yet occurred.

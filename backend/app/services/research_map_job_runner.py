@@ -111,9 +111,10 @@ class ResearchMapJobRunner:
         # ---- Step 3: generate the research map (no transaction open) ----
         try:
             research_map = self._research_map_service.generate_map(extraction)
-        except MapGenerationError:
+        except MapGenerationError as exc:
             _log.error(
-                "Map generation failed for paper_id=%r.", job.paper_id,
+                "Research map generation failed: issue_codes=%s",
+                sorted(exc.issue_codes) or ["UNKNOWN"],
             )
             self._mark_failed(job_id, _MAP_GENERATION_FAILED)
             return

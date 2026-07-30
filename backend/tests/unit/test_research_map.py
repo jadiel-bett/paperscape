@@ -7,6 +7,7 @@ grounding, confidence handling, corrective retry, safety, and imports.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from typing import Any
@@ -999,6 +1000,130 @@ class TestIssueCodes:
             # Ensure no exception references in the corrective prompt.
             assert "traceback" not in corrective.lower()
             assert "Exception" not in corrective
+
+    def test_first_attempt_logs_only_sorted_safe_issue_codes(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The initial validation log excludes prompt, output, and chunk text."""
+        prompt_sentinel = "SENTINEL_PROMPT_TEXT"
+        output_sentinel = "SENTINEL_MODEL_OUTPUT"
+        chunk_sentinel = "SENTINEL_PAPER_CHUNK_TEXT"
+        extraction = _make_extraction(
+            chunks=[
+                _make_chunk(
+                    "test-paper-id-p1-1",
+                    page=1,
+                    section="Abstract",
+                    text=f"Abstract content. {chunk_sentinel}",
+                ),
+                _make_chunk(
+                    "test-paper-id-p3-1",
+                    page=3,
+                    section="Results",
+                    text="Results content showing data.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p4-1",
+                    page=4,
+                    section="Discussion",
+                    text="Discussion of findings.",
+                ),
+            ]
+        )
+        service, _ = _make_service(
+            responses=[output_sentinel, _default_valid_response()],
+            prompt_template=f"{prompt_sentinel} {_CONTEXT_SENTINEL}",
+        )
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        result = service.generate_map(extraction)
+
+        assert isinstance(result, ResearchMap)
+        validation_logs = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Research map validation failed:")
+        ]
+        assert validation_logs == [
+            "Research map validation failed: attempt=1 "
+            "issue_codes=['INVALID_JSON']"
+        ]
+        complete_log = caplog.text
+        assert prompt_sentinel not in complete_log
+        assert output_sentinel not in complete_log
+        assert chunk_sentinel not in complete_log
+
+    def test_corrective_returned_issue_codes_are_preserved(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Grounding issues returned on attempt two survive on the final error."""
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["evidence"][0]["page"] = 99
+        invalid["findings"][1]["evidence"][0]["excerpt"] = (
+            "SENTINEL_MODEL_OUTPUT_EXCERPT"
+        )
+        service, provider = _make_service(
+            responses=["{invalid json}", json.dumps(invalid)]
+        )
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(_make_extraction())
+
+        assert provider.call_count == 2
+        assert excinfo.value.issue_codes == frozenset(
+            {_IssueCode.EXCERPT_NOT_FOUND, _IssueCode.PAGE_MISMATCH}
+        )
+        assert (
+            "Research map validation failed: attempt=2 "
+            "issue_codes=['EXCERPT_NOT_FOUND', 'PAGE_MISMATCH']"
+            in caplog.messages
+        )
+        assert "SENTINEL_MODEL_OUTPUT_EXCERPT" not in caplog.text
+
+    def test_corrective_raised_issue_codes_and_chain_are_handled(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Attempt-two exceptions retain codes without logging their chain."""
+        service, provider = _make_service(responses=["{invalid json}", "{}"])
+        original_parse = service._parse_and_validate
+        parse_calls = 0
+
+        def _parse_with_chained_failure(
+            raw: str,
+            selected_chunks: list[Chunk],
+        ) -> tuple[_InternalResearchMap, set[str]]:
+            nonlocal parse_calls
+            parse_calls += 1
+            if parse_calls == 2:
+                try:
+                    raise ValueError("SENTINEL_CHAINED_EXCEPTION")
+                except ValueError as cause:
+                    raise MapGenerationError(
+                        "SENTINEL_OUTER_EXCEPTION",
+                        issue_codes={_IssueCode.INVALID_SCHEMA},
+                    ) from cause
+            return original_parse(raw, selected_chunks)
+
+        monkeypatch.setattr(service, "_parse_and_validate", _parse_with_chained_failure)
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(_make_extraction())
+
+        assert provider.call_count == 2
+        assert excinfo.value.issue_codes == frozenset({_IssueCode.INVALID_SCHEMA})
+        assert (
+            "Research map validation failed: attempt=2 "
+            "issue_codes=['INVALID_SCHEMA']"
+            in caplog.messages
+        )
+        assert "SENTINEL_CHAINED_EXCEPTION" not in caplog.text
+        assert "SENTINEL_OUTER_EXCEPTION" not in caplog.text
 
 
 # ===================================================================

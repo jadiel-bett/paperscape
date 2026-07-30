@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import unicodedata
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -58,15 +59,6 @@ _EXCLUDED_SECTION_KEYWORDS: frozenset[str] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
-
-class MapGenerationError(RuntimeError):
-    """The model did not produce a valid grounded research map."""
-
-
-# ---------------------------------------------------------------------------
 # Issue codes for corrective retry
 # ---------------------------------------------------------------------------
 
@@ -82,6 +74,50 @@ class _IssueCode:
     DUPLICATE_EVIDENCE = "DUPLICATE_EVIDENCE"
     MISSING_LIMITATION = "MISSING_LIMITATION"
     UNCERTAIN_CONFIDENCE = "UNCERTAIN_CONFIDENCE"
+
+
+_SAFE_ISSUE_CODES: frozenset[str] = frozenset(
+    {
+        _IssueCode.INVALID_JSON,
+        _IssueCode.INVALID_SCHEMA,
+        _IssueCode.WRONG_FINDING_COUNT,
+        _IssueCode.UNKNOWN_CHUNK_ID,
+        _IssueCode.PAGE_MISMATCH,
+        _IssueCode.EXCERPT_NOT_FOUND,
+        _IssueCode.DUPLICATE_FINDING,
+        _IssueCode.DUPLICATE_EVIDENCE,
+        _IssueCode.MISSING_LIMITATION,
+        _IssueCode.UNCERTAIN_CONFIDENCE,
+    }
+)
+
+
+def _safe_issue_codes(issue_codes: Iterable[str]) -> frozenset[str]:
+    """Return only fixed, non-sensitive ResearchMap validation issue codes."""
+    return frozenset(issue_codes) & _SAFE_ISSUE_CODES
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class MapGenerationError(RuntimeError):
+    """The model did not produce a valid grounded research map."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        issue_codes: Iterable[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self._issue_codes = _safe_issue_codes(issue_codes or ())
+
+    @property
+    def issue_codes(self) -> frozenset[str]:
+        """Return the safe validation issue codes carried by this error."""
+        return self._issue_codes
 
 
 # ---------------------------------------------------------------------------
@@ -305,16 +341,23 @@ class ResearchMapService:
             parsed, issues = self._parse_and_validate(response, selected)
             if not issues:
                 return self._to_public_map(parsed, extraction.paper_id)
-            issue_codes = issues
+            issue_codes = set(_safe_issue_codes(issues))
         except MapGenerationError as exc:
-            # Collect issue codes from the exception for retry.
-            if hasattr(exc, "_issue_codes"):
-                issue_codes = exc._issue_codes  # type: ignore[attr-defined]
+            issue_codes = set(exc.issue_codes)
+            _log.warning(
+                "Research map validation failed: attempt=1 issue_codes=%s",
+                sorted(issue_codes) or ["UNKNOWN"],
+            )
             if not issue_codes:
                 raise  # Re-raise if no codes were captured.
         except LLMProviderError:
             # Provider failures propagate unchanged — no corrective retry.
             raise
+        else:
+            _log.warning(
+                "Research map validation failed: attempt=1 issue_codes=%s",
+                sorted(issue_codes) or ["UNKNOWN"],
+            )
 
         # Step 4 — corrective retry.
         corrective_prompt = self._build_corrective_prompt(
@@ -328,14 +371,28 @@ class ResearchMapService:
             )
             parsed, remaining_issues = self._parse_and_validate(response, selected)
             if remaining_issues:
-                raise MapGenerationError(
-                    "Research map generation failed after corrective retry."
+                final_error = MapGenerationError(
+                    "Research map generation failed after corrective retry.",
+                    issue_codes=remaining_issues,
                 )
-            return self._to_public_map(parsed, extraction.paper_id)
+            else:
+                return self._to_public_map(parsed, extraction.paper_id)
         except MapGenerationError as exc:
-            raise MapGenerationError(
-                "Research map generation failed after corrective retry."
-            ) from exc
+            final_error = MapGenerationError(
+                "Research map generation failed after corrective retry.",
+                issue_codes=exc.issue_codes,
+            )
+            _log.warning(
+                "Research map validation failed: attempt=2 issue_codes=%s",
+                sorted(final_error.issue_codes) or ["UNKNOWN"],
+            )
+            raise final_error from exc
+
+        _log.warning(
+            "Research map validation failed: attempt=2 issue_codes=%s",
+            sorted(final_error.issue_codes) or ["UNKNOWN"],
+        )
+        raise final_error
 
     # ------------------------------------------------------------------
     # Context selection
@@ -513,34 +570,36 @@ class ResearchMapService:
         elif trimmed.startswith("```") and not trimmed.startswith("```json"):
             # Plain ``` without json marker -> reject.
             issues.add(_IssueCode.INVALID_JSON)
-            exc = MapGenerationError("Model output uses unmarked code fences.")
-            exc._issue_codes = issues  # type: ignore[attr-defined]
-            raise exc
+            raise MapGenerationError(
+                "Model output uses unmarked code fences.",
+                issue_codes=issues,
+            )
 
         if not (trimmed.startswith("{") and trimmed.endswith("}")):
             issues.add(_IssueCode.INVALID_JSON)
-            exc = MapGenerationError("Model output does not contain a JSON object.")
-            exc._issue_codes = issues
-            raise exc
+            raise MapGenerationError(
+                "Model output does not contain a JSON object.",
+                issue_codes=issues,
+            )
 
         try:
             obj: dict[str, Any] = json.loads(trimmed)
         except json.JSONDecodeError:
             issues.add(_IssueCode.INVALID_JSON)
-            exc = MapGenerationError("Model output contains malformed JSON.")
-            exc._issue_codes = issues
-            raise exc
+            raise MapGenerationError(
+                "Model output contains malformed JSON.",
+                issue_codes=issues,
+            )
 
         # --- Step 2: Pydantic validation ---
         try:
             parsed = _InternalResearchMap.model_validate(obj)
         except Exception:
             issues.add(_IssueCode.INVALID_SCHEMA)
-            exc = MapGenerationError(
-                "Model output does not conform to the expected schema."
+            raise MapGenerationError(
+                "Model output does not conform to the expected schema.",
+                issue_codes=issues,
             )
-            exc._issue_codes = issues
-            raise exc
 
         # --- Step 3: specific schema post-checks ---
         if len(parsed.findings) != 3:
