@@ -87,3 +87,56 @@ Rights-approved PDFs belong only under ignored `evals/live/papers/`. Complete
 maps and private review artifacts belong only under ignored
 `evals/live/results/private/`. Sanitized, approved scorecards may be committed
 outside the private results directory.
+
+## Primary Demo Paper
+
+### Social media use and adolescent sleep patterns: cross-sectional findings from the UK Millennium Cohort Study
+
+- **Authors:** Holly Scott, Stephany M. Biello, Heather Cleland Woods
+- **Journal:** BMJ Open
+- **Year:** 2019
+- **DOI:** `10.1136/bmjopen-2019-031161`
+- **PMID:** `31641035`
+- **PMCID:** `PMC6830469`
+- **Subject area:** Public health / adolescent wellbeing
+- **Primary demo:** Yes
+- **Local filename:** `social-media-adolescent-sleep.pdf`
+- **Licence:** Creative Commons Attribution 4.0
+- **Rights status:** Approved for PaperScape demo use
+- **Excerpt use reviewed:** Yes
+- **PDF source:** University of Glasgow Enlighten repository
+- **Licence evidence:** BMJ Open and PMC copyright notice
+- **Retrieval date:** 2026-07-30
+
+### Research question
+
+Is adolescents' daily social-media use associated with sleep timing and sleep
+quality after accounting for demographic, family, psychological, health, and
+other relevant covariates?
+
+### Expected high-level findings
+
+1. Very high daily social-media use was common: 20.8% of the analysed
+   adolescents reported at least five hours per day.
+
+2. Girls generally reported heavier social-media use than boys.
+
+3. Compared with average users, very high users had greater adjusted odds of
+   late school-day sleep onset, late school-day waking, and difficulty returning
+   to sleep after nighttime awakening.
+
+### Important limitations
+
+- The study is cross-sectional and therefore does not establish causation.
+- Social-media use and sleep outcomes were self-reported.
+- Social-media exposure was measured mainly by duration rather than content,
+  timing, context, or emotional engagement.
+- Sleep and social-media measures used individual survey questions rather than
+  validated multi-item measures.
+
+### Selection rationale
+
+The paper is short, text-selectable, clearly licensed, understandable to a
+general audience, and contains multiple traceable textual findings and explicit
+limitations. Its cross-sectional design provides a useful test of whether
+PaperScape preserves association-versus-causation language.
