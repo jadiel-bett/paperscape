@@ -4258,3 +4258,21 @@ The completed migration passed:
 
 Both live gates remained absent. No live watsonx call occurred, no real provider
 was constructed, and no ignored credential file was inspected.
+
+#### Migrated Chat Tier A result
+
+After the provider migration from the deprecated text-generation endpoint to
+the watsonx Chat API, the gated Tier A connectivity test was run once against
+the Frankfurt project using `ibm/granite-4-h-small`.
+
+Result:
+
+- `1 passed`
+- execution time: `13.48s`
+- warnings: none
+- no automatic rerun
+- no credentials, project identifiers, prompts, or generated content recorded
+
+This proved live compatibility of the pinned SDK, Frankfurt endpoint, project,
+candidate model, and PaperScape Chat provider path. The one-run approval was
+consumed. Tier B remained separately blocked.

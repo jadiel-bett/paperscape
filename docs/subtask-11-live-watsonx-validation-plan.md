@@ -583,6 +583,37 @@ It does not authorize:
 This approval is consumed when the Tier A command is executed, regardless of
 whether the test passes or fails.
 
+### Execution record
+
+- Executed on: 2026-07-30
+- Outcome: passed
+- Model: `ibm/granite-4-h-small`
+- Region: Frankfurt (`eu-de`)
+- Provider path: `ModelInference.chat`
+- Output limit: 32 completion tokens
+- Test selection: `-k provider_connectivity`
+- Warnings: none
+- Automatic or manual rerun performed: no
+- Approval status: consumed
+- Credentials or generated content recorded: no
+
+### Tier A conclusion
+
+The migrated watsonx Chat API path is compatible with the PaperScape provider
+for the Frankfurt project and the explicitly selected
+`ibm/granite-4-h-small` model.
+
+This result authorizes the next bounded implementation stage:
+
+- promote `ibm/granite-4-h-small` to the application default;
+- update the corresponding configuration assertion and documentation;
+- run all offline regression gates;
+- add the separately gated Tier B ResearchMap validation;
+- add the live evaluator and its authorization safeguards.
+
+It does not authorize a Tier B paid call. Tier B requires a separate explicit
+approval after its implementation and audit.
+
 ## 7. Validation tiers
 
 ### 7.1 Tier A — provider connectivity smoke
