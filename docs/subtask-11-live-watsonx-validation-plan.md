@@ -1819,3 +1819,85 @@ removal of uncertain detail. Existing issue-specific guidance remains as
 additional emphasis and composes with the universal contract. Validators, the
 initial prompt, public provenance, and provider-call bounds are unchanged. No
 live or paid call occurred during this implementation.
+
+## 31. Provider-failure-only deterministic extractive fallback
+
+Earlier real runs proved the Granite integration and its corrective validation
+path. Monthly watsonx token availability later became unreliable, so
+PaperScape now preserves demo continuity with a narrowly scoped deterministic
+fallback. Granite remains the primary path. The fallback runs only when
+`ResearchMapService` raises `LLMProviderError`; it does not run for
+model-validation failures, `MapGenerationError`, extraction or persistence
+errors, invalid requests, or unexpected exceptions.
+
+The fallback is extractive rather than semantic synthesis. It selects exactly
+three complete, eligible, sufficiently diverse source sentences from distinct
+extracted chunks, preserves their normalized wording and real page/chunk
+provenance, and assigns partial confidence. It never paraphrases or pads an
+insufficient result. When three safe findings cannot be selected, the existing
+public `llm_provider_error` failure remains in effect and no map is persisted.
+
+Generation mode and the safe fallback reason are stored atomically in the
+internal `research_map_metadata` table. Legacy map rows without metadata are
+read internally as Granite output. The public `ResearchMap` shape is unchanged,
+and the fallback is not exposed as model synthesis.
+
+Demo note: PaperScape uses Granite first. When the AI provider is unavailable,
+it can degrade safely to an internally labelled deterministic extractive map
+rather than fabricating unsupported claims.
+
+No live, network, paid, or watsonx call occurred during this implementation.
+
+## 32. Final deterministic-fallback audit remediation
+
+The final read-only audit found four issues: caller-owned saves could retain a
+partial map update after metadata failure, punctuation-only sentence splitting
+mishandled abbreviations and headings, method rejection depended too heavily on
+section metadata, and the fallback service was constructed eagerly.
+
+Caller-owned map saves now use a repository-local SQLite savepoint. A metadata
+failure rolls back both repository writes while preserving unrelated outer
+transaction work and leaving the caller in control of commit or rollback. The
+sentence scanner now preserves line boundaries while discarding standalone
+headings, protects explicit abbreviations and personal initials, recognizes
+terminal punctuation followed by closing quotes or brackets, and continues to
+preserve decimals and quantitative expressions. Bounded procedural patterns
+reject method-only sentences even without section metadata while retaining
+result sentences that mention adjusted models or analyses.
+
+Dependency wiring now injects a zero-argument fallback factory. Construction
+occurs exactly once inside the `LLMProviderError` branch and never during
+container creation, health requests, Granite success, or `MapGenerationError`.
+Activation boundaries, public schemas, evidence requirements, diversity,
+failure codes, Granite prompts, and validators remain unchanged. No live,
+network, paid, or watsonx call occurred during remediation.
+
+The final commit-readiness audit also identified uppercase proper-noun
+continuations after `U.S.`, `U.K.`, and `vs.` as an abbreviation boundary that
+could leave an eligible trailing fragment. Those abbreviations now remain
+internal when body text follows, with scanner- and service-level regressions
+covering finding-cue continuations. End-of-block and closing-punctuation uses
+remain terminal.
+
+A follow-up audit caught the inverse ambiguity: treating every uppercase token
+after those abbreviations as a continuation could join two source sentences.
+Because an arbitrary uppercase token cannot reliably distinguish a proper-noun
+continuation from a new sentence without external linguistic inference, the
+scanner now treats the boundary as ambiguous by default, independently of the
+finding eligibility rules. The ambiguous span is excluded rather than split or
+joined. Only narrow structurally incomplete prefixes such as `The U.S.` before
+`Department`, `The U.K.` before `Biobank`, and `Treatment vs.` before `Control`
+remain protected. Clear end-of-block terminals remain eligible. Regressions
+cover long and short preceding sentences followed by `Results`, `Findings`,
+`Researchers`, `Participants`, and a proper-name sentence starter.
+
+The final two audit findings were remediated without changing activation or
+persistence boundaries. Passive `measured`, `assessed`, `evaluated`, `fitted`,
+`fit`, `trained`, `collected`, and `recorded` constructions followed by
+`using`, `with`, or `by` could escape the object-dependent method filter; a
+bounded high-confidence passive-procedure rule now rejects them independently
+of section metadata or recognized method objects. Generic title-case heading
+detection could also discard wrapped result text. Finding-cue-bearing,
+procedural, and continuation-ending title-case lines are now retained as body
+text, while known headings, standalone title labels, and all-caps headings are
+still removed. No live, network, paid, or watsonx call occurred.

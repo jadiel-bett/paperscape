@@ -4499,3 +4499,79 @@ outcome-naming exact source phrases, individual-span numeric support, and
 removal of uncertain detail. Conditional issue-specific blocks still compose
 as additional emphasis. No validator, initial prompt, public provenance, or
 provider-call bound changed, and no live call occurred.
+
+### Provider-failure-only deterministic extractive fallback
+
+Earlier real executions proved that PaperScape reaches Granite and validates
+its structured output. Monthly watsonx token availability subsequently became
+unreliable. Granite remains first, including the existing corrective call and
+validators, but an `LLMProviderError` can now activate an injected deterministic
+extractive service.
+
+The service selects exactly three distinct, sufficiently diverse complete
+sentences from real extraction chunks. Statements and excerpts are the same
+normalized source sentence, with real chunk IDs, one-based pages, and partial
+confidence. It performs no semantic synthesis, paraphrasing, provider call,
+network access, environment lookup, or padding. If it cannot find three safe
+sentences, the job retains the existing safe `llm_provider_error` outcome.
+Model-validation failures and `MapGenerationError` never activate it.
+
+An additive internal metadata table records `granite` or
+`deterministic_extractive_fallback`, the permitted fallback reason, and the
+generation timestamp in the same transaction as `map_json`. The public
+`ResearchMap` response remains unchanged and contains no generation mode,
+fallback reason, score, or diagnostics.
+
+Demo note: PaperScape uses Granite first. When the AI provider is unavailable,
+it can degrade safely to an internally labelled deterministic extractive map
+rather than fabricating unsupported claims.
+
+No live, network, paid, or watsonx call occurred during implementation.
+
+### Final deterministic-fallback audit remediation
+
+The final audit identified a caller-owned transaction atomicity risk, naive
+abbreviation and heading boundaries, method-only candidates without section
+metadata, and eager fallback construction. Caller-owned `ResearchMapStore`
+saves now use a fixed internal savepoint, so repository writes roll back
+together without discarding unrelated outer transaction changes.
+
+The deterministic scanner is abbreviation-, initial-, heading-, and
+closing-punctuation-aware while preserving decimals and exact normalized source
+wording. High-confidence procedural patterns now reject unlabelled method-only
+sentences without excluding result statements merely for mentioning an
+adjusted model or analysis. A zero-argument factory keeps fallback construction
+lazy until `LLMProviderError`; Granite success and validation failures never
+construct it. Public APIs, job errors, prompts, validators, evidence rules, and
+diversity behavior are unchanged. No live, network, paid, or watsonx call
+occurred during remediation.
+
+The final commit-readiness audit found one remaining uppercase-continuation
+case: `U.S.`, `U.K.`, or `vs.` followed by a capitalized proper noun could be
+treated as a sentence boundary and expose an eligible trailing fragment. The
+scanner now preserves those continuations while retaining terminal behavior at
+the end of a block or before closing punctuation. Focused scanner and
+service-level regressions cover all three forms.
+
+The next read-only audits found the complementary terminal case: a complete
+sentence ending in `U.S.` or `U.K.` could be joined to a following sentence,
+and a finite starter allowlist could not cover arbitrary research subjects or
+proper names. The deterministic scanner now fails closed for that ambiguity.
+Uppercase text following `U.S.`, `U.K.`, or `vs.` is ambiguous by default and
+the affected span is excluded rather than split into a fragment or joined
+across source sentences. This decision no longer depends on the finding
+eligibility rule or its six-token minimum. Only narrow structurally incomplete
+prefixes preserve the established `The U.S. Department`, `The U.K. Biobank`,
+and `Treatment vs. Control` continuations; clear end-of-block terminals remain
+intact.
+
+The final audit found that passive measurement, assessment, evaluation,
+fitting, training, collection, and recording procedures could escape when the
+instrument was absent from the method-object list. A bounded passive-procedure
+rule now rejects complete `was`/`were ... using`/`with`/`by` constructions
+without broadly rejecting result vocabulary. The audit also found that generic
+title-case heading detection could remove the first line of a wrapped result.
+Title-case lines carrying finding, procedural, or continuation evidence now
+remain body text and join before sentence filtering; known, standalone-label,
+and all-caps headings remain excluded. No live, network, paid, or watsonx call
+occurred.

@@ -39,7 +39,8 @@ def init_db(
 ) -> None:
     """Initialise the database schema and reset any stale jobs.
 
-    Creates the ``jobs``, ``extractions``, and ``research_maps`` tables
+    Creates the ``jobs``, ``extractions``, ``research_maps``, and
+    ``research_map_metadata`` tables
     (idempotent — uses ``CREATE TABLE IF NOT EXISTS``).
 
     FastAPI ``BackgroundTasks`` are in-process and not durable.  Any jobs
@@ -101,6 +102,28 @@ def init_db(
             CREATE TABLE IF NOT EXISTS research_maps (
                 paper_id TEXT NOT NULL PRIMARY KEY,
                 map_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS research_map_metadata (
+                paper_id        TEXT NOT NULL PRIMARY KEY,
+                generation_mode TEXT NOT NULL
+                                CHECK (
+                                    generation_mode IN (
+                                        'granite',
+                                        'deterministic_extractive_fallback'
+                                    )
+                                ),
+                fallback_reason TEXT
+                                CHECK (
+                                    fallback_reason IS NULL
+                                    OR fallback_reason = 'llm_provider_error'
+                                ),
+                generated_at    TEXT NOT NULL,
+                FOREIGN KEY (paper_id)
+                    REFERENCES research_maps(paper_id) ON DELETE CASCADE
             )
             """
         )

@@ -8,19 +8,27 @@ are captured as safe error codes.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from app.repositories import (
     ExtractionStore,
+    GenerationMode,
     InvalidJobTransitionError,
     JobStore,
     PersistenceError,
     RecordNotFoundError,
     ResearchMapStore,
 )
+from app.services.extractive_research_map import (
+    ExtractiveFallbackError,
+    ExtractiveResearchMapService,
+)
 from app.services.llm_provider import LLMProviderError
 from app.services.research_map import MapGenerationError, ResearchMapService
 
 _log = logging.getLogger(__name__)
+
+ExtractiveFallbackFactory = Callable[[], ExtractiveResearchMapService]
 
 # ---------------------------------------------------------------------------
 # Error codes (all match ^[a-z][a-z0-9_]{0,63}$)
@@ -65,11 +73,13 @@ class ResearchMapJobRunner:
         extraction_store: ExtractionStore,
         research_map_store: ResearchMapStore,
         research_map_service: ResearchMapService,
+        extractive_fallback_factory: ExtractiveFallbackFactory,
     ) -> None:
         self._job_store = job_store
         self._extraction_store = extraction_store
         self._research_map_store = research_map_store
         self._research_map_service = research_map_service
+        self._extractive_fallback_factory = extractive_fallback_factory
 
     def run(self, job_id: str) -> None:
         """Execute the research-map generation job.
@@ -111,6 +121,8 @@ class ResearchMapJobRunner:
         # ---- Step 3: generate the research map (no transaction open) ----
         try:
             research_map = self._research_map_service.generate_map(extraction)
+            generation_mode = GenerationMode.GRANITE
+            fallback_reason = None
         except MapGenerationError as exc:
             _log.error(
                 "Research map generation failed: issue_codes=%s",
@@ -118,12 +130,40 @@ class ResearchMapJobRunner:
             )
             self._mark_failed(job_id, _MAP_GENERATION_FAILED)
             return
-        except LLMProviderError:
-            _log.error(
-                "LLM provider error for paper_id=%r.", job.paper_id,
+        except LLMProviderError as exc:
+            _log.warning(
+                "Provider failed; deterministic extractive fallback activated "
+                "for paper_id=%r generation_mode=%r exception=%s.",
+                job.paper_id,
+                GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK.value,
+                type(exc).__name__,
             )
-            self._mark_failed(job_id, _LLM_PROVIDER_ERROR)
-            return
+            try:
+                fallback_service = self._extractive_fallback_factory()
+                research_map = fallback_service.generate(extraction)
+            except ExtractiveFallbackError:
+                _log.error(
+                    "Fallback could not produce three eligible findings "
+                    "for paper_id=%r.",
+                    job.paper_id,
+                )
+                self._mark_failed(job_id, _LLM_PROVIDER_ERROR)
+                return
+            except Exception as fallback_exc:
+                _log.error(
+                    "Unexpected error during fallback for paper_id=%r: %s",
+                    job.paper_id,
+                    type(fallback_exc).__name__,
+                )
+                self._mark_failed(job_id, _UNEXPECTED_ERROR)
+                return
+            generation_mode = GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK
+            fallback_reason = _LLM_PROVIDER_ERROR
+            _log.info(
+                "Fallback succeeded for paper_id=%r generation_mode=%r.",
+                job.paper_id,
+                generation_mode.value,
+            )
         except Exception as exc:
             _log.error(
                 "Unexpected error during map generation for paper_id=%r: %s",
@@ -135,7 +175,11 @@ class ResearchMapJobRunner:
 
         # ---- Step 4: persist the research map ----
         try:
-            self._research_map_store.save(research_map)
+            self._research_map_store.save(
+                research_map,
+                generation_mode=generation_mode,
+                fallback_reason=fallback_reason,
+            )
         except PersistenceError as exc:
             _log.error(
                 "Persistence error saving research map for paper_id=%r: %s",
