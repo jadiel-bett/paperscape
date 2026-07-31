@@ -5,6 +5,15 @@ slice: select a PDF, upload it to the FastAPI backend, start or reuse a
 research-map job, poll for completion, and display grounded findings with source
 evidence and limitations.
 
+## Research Atlas visual system
+
+The interface uses a PaperScape “Research Atlas” treatment: paper-like result
+surfaces, a page-aware evidence trail, contour-map decoration, and an
+IBM-inspired electric blue/cyan/violet palette. The technology badge references
+watsonx.ai and Granite without exposing credentials or requiring IBM event logo
+assets. The upload surface remains picker-based; the visual treatment does not
+claim drag-and-drop support.
+
 ## Local Flutter development
 
 From `frontend/`:
