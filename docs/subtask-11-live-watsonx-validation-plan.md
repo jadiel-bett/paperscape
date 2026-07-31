@@ -1901,3 +1901,26 @@ detection could also discard wrapped result text. Finding-cue-bearing,
 procedural, and continuation-ending title-case lines are now retained as body
 text, while known headings, standalone title labels, and all-caps headings are
 still removed. No live, network, paid, or watsonx call occurred.
+
+A real deterministic fallback run succeeded with three acceptable findings,
+but manual review found that the paper title was incorrectly selected as a
+limitation because `cross-sectional` qualified alone. Limitation selection now
+separates bounded direct limitation claims from contextual design terms.
+`Cross-sectional`, self-report, observational, retrospective, and convenience
+sample wording requires explicit limitation framing or consequence language in
+the same complete sentence. Title/subtitle wording and bare design labels are
+rejected; when no true limitation is present, the existing transparent fixed
+limitation is returned. No live, network, paid, or watsonx call occurred during
+this remediation.
+
+The final limitation-selection audit found three remaining precision gaps.
+Subject-independent `interpreted with caution` and `interpreted cautiously`
+phrases now qualify through one bounded, case-insensitive pattern. The
+limitation-only `Because ...` completeness exception now requires a finite
+subordinate clause and a complete, allowlisted consequence predicate rather
+than accepting a trailing noun fragment. A separate limitation-title check
+rejects short cue-bearing title-style noun phrases without relying on wrapped
+body-line heading detection, while retaining complete title-cased limitation
+claims. Finding selection, source ordering, exact-source preservation, public
+schemas, activation boundaries, and persistence behavior are unchanged. No
+live, network, paid, or watsonx call occurred during this remediation.

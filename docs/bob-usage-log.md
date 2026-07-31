@@ -4575,3 +4575,22 @@ Title-case lines carrying finding, procedural, or continuation evidence now
 remain body text and join before sentence filtering; known, standalone-label,
 and all-caps headings remain excluded. No live, network, paid, or watsonx call
 occurred.
+
+A successful real-paper fallback run produced three acceptable findings, but
+manual review identified a limitation-selection false positive: the paper title
+was selected solely because it contained `cross-sectional`. Direct limitation
+cues are now bounded, while contextual design descriptors require explicit
+limitation framing or consequence wording in the same sentence. Title-like
+topic/subtitle text and bare design labels are excluded, and the existing fixed
+transparent limitation is used when no genuine limitation sentence is
+available. No live, network, paid, or watsonx call occurred.
+
+The final limitation-only remediation generalized caution wording to a bounded
+subject-independent `interpreted with caution`/`interpreted cautiously` rule,
+tightened the special `Because ...` allowance to require a finite subordinate
+clause plus a complete consequence predicate, and added a limitation-specific
+title-style noun-phrase rejection independent of wrapped-body heading logic.
+Complete title-cased limitation claims remain eligible. Finding eligibility,
+stable exact-source selection, fallback activation, transaction behavior,
+metadata, and public responses are unchanged. No live, network, paid, or
+watsonx call occurred.

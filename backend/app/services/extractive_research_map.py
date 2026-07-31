@@ -40,18 +40,102 @@ _FINDING_CUES = (
     "compared to",
 )
 _STRONG_CUES = ("associated with", "more likely", "less likely")
-_LIMITATION_CUES = (
+_DIRECT_LIMITATION_CUES = (
     "limitation",
     "limitations",
-    "cross-sectional",
-    "self-report",
-    "self-reported",
+    "limited by",
     "cannot establish",
     "cannot determine",
+    "cannot infer",
+    "unable to establish",
+    "unable to determine",
     "may not generalise",
     "may not generalize",
     "residual confounding",
     "selection bias",
+    "recall bias",
+    "reporting bias",
+    "measurement error",
+)
+_CAUTION_LIMITATION_RE = re.compile(
+    r"\binterpreted\s+(?:with\s+caution|cautiously)\b",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_DESIGN_CUES = (
+    "cross-sectional",
+    "self-report",
+    "self-reported",
+    "observational",
+    "retrospective",
+    "convenience sample",
+)
+_LIMITATION_FRAMING_CUES = (
+    "limitation",
+    "limitations",
+    "limits",
+    "limited",
+    "cannot",
+    "unable",
+    "may",
+    "bias",
+    "confounding",
+    "causal",
+    "causality",
+    "generalisability",
+    "generalizability",
+    "caution",
+    "uncertainty",
+)
+_LIMITATION_FINITE_PREDICATE_RE = re.compile(
+    r"(?:"
+    r"\b(?:is|was)\s+a\s+limitation\b|"
+    r"\b(?:are|were)\s+limitations\b|"
+    r"\blimit(?:s|ed)\s+(?:conclusions?|causal\s+inference)\b|"
+    r"\b(?:cannot|could\s+not)\s+(?:establish|determine|infer|be\s+established|"
+    r"be\s+determined|be\s+inferred)\b|"
+    r"\b(?:is|are)\s+unable\s+to\s+(?:establish|determine|infer)\b|"
+    r"\bmay\s+(?:limit|introduce|affect|increase|overestimate|underestimate|"
+    r"be\s+overestimated|be\s+underestimated)\b|"
+    r"\b(?:should|must|can|could|may)\s+be\s+interpreted\s+"
+    r"(?:with\s+caution|cautiously)\b|"
+    r"\b(?:is|are|was|were)\s+interpreted\s+(?:with\s+caution|cautiously)\b"
+    r")",
+    re.IGNORECASE,
+)
+_BECAUSE_SUBORDINATE_VERB_RE = re.compile(
+    r"\b(?:is|are|was|were|has|have|had)\b",
+    re.IGNORECASE,
+)
+_BECAUSE_CONSEQUENCE_RE = re.compile(
+    r"(?:"
+    r"\b(?:cannot|could\s+not)\s+be\s+(?:established|determined|inferred)\b|"
+    r"\b(?:is|are)\s+unable\s+to\s+(?:establish|determine|infer)\b|"
+    r"\blimit(?:s|ed)\s+(?:conclusions?|causal\s+inference)\b|"
+    r"\bmay\s+(?:limit\s+(?:generalisability|generalizability)|"
+    r"introduce\s+(?:\w+\s+)?bias|affect\s+(?:the\s+)?estimates?|"
+    r"increase\s+uncertainty|be\s+(?:overestimated|underestimated)|"
+    r"(?:overestimate|underestimate)(?:\s+or\s+"
+    r"(?:overestimate|underestimate))?\s+(?:an?\s+|the\s+)?association)\b"
+    r")",
+    re.IGNORECASE,
+)
+_LIMITATION_TITLE_TOPICS = frozenset(
+    {
+        "association",
+        "associations",
+        "effect",
+        "effects",
+        "finding",
+        "findings",
+        "implication",
+        "implications",
+        "limitation",
+        "limitations",
+        "relationship",
+        "relationships",
+        "result",
+        "results",
+    }
 )
 _CAUSAL_CUES = (
     "caused",
@@ -391,17 +475,55 @@ def _split_sentences(text: str) -> list[str]:
     return [sentence for block in _body_blocks(text) for sentence in _scan_block(block)]
 
 
-def _is_complete_source_sentence(sentence: str) -> bool:
+def _has_complete_limitation_predicate(sentence: str) -> bool:
+    return _LIMITATION_FINITE_PREDICATE_RE.search(sentence) is not None
+
+
+def _has_complete_because_consequence(sentence: str) -> bool:
+    terminal_core = sentence.rstrip(_CLOSING_CHARACTERS)
+    if not terminal_core or terminal_core[-1] not in ".?!":
+        return False
+    clause_match = re.match(
+        r"^Because\s+([^,]+),\s+(.+)$",
+        terminal_core[:-1].strip(),
+        re.IGNORECASE,
+    )
+    if clause_match is None:
+        return False
+    subordinate, consequence = clause_match.groups()
+    if len(_ALPHABETIC_TOKEN_RE.findall(subordinate)) < 3:
+        return False
+    if _BECAUSE_SUBORDINATE_VERB_RE.search(subordinate) is None:
+        return False
+    return _BECAUSE_CONSEQUENCE_RE.search(consequence) is not None
+
+
+def _is_complete_source_sentence(
+    sentence: str,
+    *,
+    allow_complete_because_clause: bool = False,
+    allow_short_limitation_claim: bool = False,
+    allow_title_case_limitation_claim: bool = False,
+) -> bool:
     terminal_core = sentence.rstrip(_CLOSING_CHARACTERS)
     if not terminal_core or terminal_core[-1] not in ".?!":
         return False
     if len(sentence) > 300:
         return False
-    if len(_ALPHABETIC_TOKEN_RE.findall(sentence)) < 6:
+    words = _ALPHABETIC_TOKEN_RE.findall(sentence)
+    short_limitation_claim = (
+        allow_short_limitation_claim
+        and len(words) >= 4
+        and _has_complete_limitation_predicate(sentence)
+    )
+    if len(words) < 6 and not short_limitation_claim:
         return False
     if terminal_core.endswith(("...", "…")):
         return False
-    if _TRUNCATED_START_RE.search(sentence):
+    complete_because_clause = (
+        allow_complete_because_clause and _has_complete_because_consequence(sentence)
+    )
+    if _TRUNCATED_START_RE.search(sentence) and not complete_because_clause:
         return False
     if _BULLET_RE.search(sentence):
         return False
@@ -414,8 +536,15 @@ def _is_complete_source_sentence(sentence: str) -> bool:
     visible_start = sentence.lstrip(_OPENING_CHARACTERS + " ")
     if visible_start and visible_start[0].isalpha() and visible_start[0].islower():
         return False
-    words = _ALPHABETIC_TOKEN_RE.findall(sentence)
-    if words and sum(word[:1].isupper() for word in words) / len(words) > 0.8:
+    title_case_limitation_claim = (
+        allow_title_case_limitation_claim
+        and _has_complete_limitation_predicate(sentence)
+    )
+    if (
+        words
+        and sum(word[:1].isupper() for word in words) / len(words) > 0.8
+        and not title_case_limitation_claim
+    ):
         return False
     return True
 
@@ -427,6 +556,53 @@ def _is_method_only(sentence: str) -> bool:
         return True
     return bool(
         _PROCEDURAL_ACTION_RE.search(sentence) and _METHOD_OBJECT_RE.search(sentence)
+    )
+
+
+def _is_limitation_title_like(sentence: str) -> bool:
+    terminal_core = sentence.rstrip(_CLOSING_CHARACTERS).rstrip(".?!").strip()
+    has_predicate = _has_complete_limitation_predicate(sentence)
+    if ":" in terminal_core and not has_predicate:
+        return True
+    heading_key = terminal_core.rstrip(":").strip().casefold()
+    if heading_key in _EXPLICIT_HEADINGS and not has_predicate:
+        return True
+    words = _ALPHABETIC_TOKEN_RE.findall(terminal_core)
+    if not words or len(words) > 10 or has_predicate:
+        return False
+    if terminal_core == terminal_core.upper():
+        return True
+    connector_words = {"and", "for", "in", "of", "on", "the", "to", "with"}
+    substantive = [word for word in words if word.casefold() not in connector_words]
+    if not substantive:
+        return False
+    topic_position = (
+        substantive[0].casefold() in _LIMITATION_TITLE_TOPICS
+        or substantive[-1].casefold() in _LIMITATION_TITLE_TOPICS
+    )
+    title_case_ratio = sum(word[:1].isupper() for word in substantive) / len(substantive)
+    return topic_position and title_case_ratio >= 0.75
+
+
+def _is_limitation_candidate(sentence: str) -> bool:
+    if not _is_complete_source_sentence(
+        sentence,
+        allow_complete_because_clause=True,
+        allow_short_limitation_claim=True,
+        allow_title_case_limitation_claim=True,
+    ):
+        return False
+    if _is_limitation_title_like(sentence):
+        return False
+    if _has_complete_because_consequence(sentence):
+        return True
+    if _CAUTION_LIMITATION_RE.search(sentence):
+        return True
+    if _contains_any(sentence, _DIRECT_LIMITATION_CUES):
+        return True
+    return _contains_any(sentence, _CONTEXTUAL_DESIGN_CUES) and _contains_any(
+        sentence,
+        _LIMITATION_FRAMING_CUES,
     )
 
 
@@ -496,8 +672,7 @@ class ExtractiveResearchMapService:
                     continue
                 if (
                     limitation is None
-                    and _is_complete_source_sentence(sentence)
-                    and _contains_any(sentence, _LIMITATION_CUES)
+                    and _is_limitation_candidate(sentence)
                 ):
                     limitation = sentence
                 if _is_finding_candidate(sentence, chunk):

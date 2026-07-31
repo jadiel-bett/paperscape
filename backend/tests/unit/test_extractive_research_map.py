@@ -10,6 +10,9 @@ from app.models.paper import Chunk, ExtractionResult
 from app.services.extractive_research_map import (
     ExtractiveFallbackError,
     ExtractiveResearchMapService,
+    _has_complete_because_consequence,
+    _is_complete_source_sentence,
+    _is_limitation_title_like,
     _is_method_only,
     _split_sentences,
 )
@@ -63,6 +66,15 @@ def _eligible_extraction() -> ExtractionResult:
             "This cross-sectional design cannot establish the direction of association.",
             section="Limitations",
         ),
+    )
+
+
+def _extraction_with_limitation_text(text: str) -> ExtractionResult:
+    return _extraction(
+        _chunk(1, text, section=None),
+        _chunk(2, "Higher attendance was observed among transport recipients."),
+        _chunk(3, "Lower attrition was associated with reminder access."),
+        _chunk(4, "A difference between groups was observed after follow-up."),
     )
 
 
@@ -267,6 +279,243 @@ def test_fixed_transparent_limitation_is_used_when_source_has_none() -> None:
     )
 
     assert result.limitations == [_FIXED_LIMITATION]
+
+
+@pytest.mark.parametrize(
+    "non_limitation",
+    [
+        (
+            "Social media use and adolescent sleep patterns: cross-sectional "
+            "findings from the UK millennium cohort study."
+        ),
+        "This was a cross-sectional study of adolescents.",
+        "Social media use was self-reported.",
+        "Participants completed a self-report questionnaire.",
+        (
+            "Adolescent sleep patterns: cross-sectional findings from a national "
+            "cohort study."
+        ),
+        "Limitations Associated With Sleep Outcomes.",
+        "Limitations of the Current Study.",
+        "Cross-Sectional Study Limitations.",
+        "Associations and Potential Limitations.",
+        "Limitations Related to Self-Reported Measures.",
+    ],
+)
+def test_titles_and_contextual_design_labels_are_not_limitations(
+    non_limitation: str,
+) -> None:
+    result = ExtractiveResearchMapService().generate(
+        _extraction_with_limitation_text(non_limitation)
+    )
+
+    assert result.limitations == [_FIXED_LIMITATION]
+
+
+@pytest.mark.parametrize(
+    "limitation",
+    [
+        (
+            "Because the study was cross-sectional, causal direction cannot be "
+            "established."
+        ),
+        "The cross-sectional design limits conclusions about causality.",
+        "Self-reported measures may be affected by recall bias.",
+        "The study has several limitations that should be considered carefully.",
+        (
+            "Because exposure was self-reported, recall bias may affect the "
+            "estimates."
+        ),
+        (
+            "Because the sample was selected from one region, this may limit "
+            "generalizability."
+        ),
+        (
+            "Because residual confounding is possible, the association may be "
+            "overestimated."
+        ),
+        (
+            "Because residual confounding is possible, the analysis may "
+            "overestimate or underestimate an association."
+        ),
+    ],
+)
+def test_explicit_limitation_sentences_are_selected_exactly(limitation: str) -> None:
+    result = ExtractiveResearchMapService().generate(
+        _extraction_with_limitation_text(limitation)
+    )
+
+    assert result.limitations == [limitation]
+
+
+@pytest.mark.parametrize(
+    "caution_sentence",
+    [
+        "The findings were interpreted with caution.",
+        "These estimates were interpreted cautiously.",
+        "The results should be interpreted with caution.",
+        "This association must be interpreted cautiously.",
+    ],
+)
+def test_generic_caution_phrases_qualify_with_any_subject(
+    caution_sentence: str,
+) -> None:
+    result = ExtractiveResearchMapService().generate(
+        _extraction_with_limitation_text(caution_sentence)
+    )
+
+    assert result.limitations == [caution_sentence]
+
+
+@pytest.mark.parametrize(
+    "caution_overlap",
+    [
+        "The authors discussed caution.",
+        "Cautious interpretation was recommended.",
+        "The findings were interpreted.",
+        "Caution was noted throughout the discussion section.",
+    ],
+)
+def test_partial_caution_vocabulary_does_not_qualify(caution_overlap: str) -> None:
+    result = ExtractiveResearchMapService().generate(
+        _extraction_with_limitation_text(caution_overlap)
+    )
+
+    assert result.limitations == [_FIXED_LIMITATION]
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "Because the study was cross-sectional, causal.",
+        "Because the measures were self-reported, bias.",
+        "Because the sample was small, uncertainty.",
+        "Because the design was observational, limitations.",
+        "Because the study was retrospective, caution.",
+    ],
+)
+def test_incomplete_because_consequences_use_fixed_limitation(fragment: str) -> None:
+    assert not _has_complete_because_consequence(fragment)
+
+    result = ExtractiveResearchMapService().generate(
+        _extraction_with_limitation_text(fragment)
+    )
+
+    assert result.limitations == [_FIXED_LIMITATION]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Limitations Associated With Sleep Outcomes.",
+        "Limitations of the Current Study.",
+        "Cross-Sectional Study Limitations.",
+        "Associations and Potential Limitations.",
+        "Limitations Related to Self-Reported Measures.",
+    ],
+)
+def test_limitation_specific_title_helper_rejects_noun_phrases(title: str) -> None:
+    assert _is_limitation_title_like(title)
+
+
+@pytest.mark.parametrize(
+    "title_cased_claim",
+    [
+        "The Cross-Sectional Design Limits Conclusions About Causality.",
+        "These Findings Should Be Interpreted With Caution.",
+        "Self-Reported Measures May Introduce Recall Bias.",
+    ],
+)
+def test_complete_title_cased_limitation_claims_qualify(
+    title_cased_claim: str,
+) -> None:
+    result = ExtractiveResearchMapService().generate(
+        _extraction_with_limitation_text(title_cased_claim)
+    )
+
+    assert result.limitations == [title_cased_claim]
+
+
+def test_because_limitation_exception_does_not_change_finding_completeness() -> None:
+    result_like = (
+        "Because exposure increased, participants were more likely to report "
+        "insomnia."
+    )
+    assert not _is_complete_source_sentence(result_like)
+
+    extraction = _extraction(
+        _chunk(1, result_like, section=None),
+        _chunk(2, "Lower attrition was associated with reminder access."),
+        _chunk(3, "A difference between groups was observed after follow-up."),
+    )
+    with pytest.raises(ExtractiveFallbackError):
+        ExtractiveResearchMapService().generate(extraction)
+
+
+def test_first_eligible_limitation_is_selected_in_stable_source_order() -> None:
+    first = "The cross-sectional design limits conclusions about causality."
+    second = "Self-reported measures may be affected by recall bias."
+    extraction = _extraction(
+        _chunk(1, first, section=None),
+        _chunk(2, second, section=None),
+        _chunk(3, "Higher attendance was observed among transport recipients."),
+        _chunk(4, "Lower attrition was associated with reminder access."),
+        _chunk(5, "A difference between groups was observed after follow-up."),
+    )
+
+    result = ExtractiveResearchMapService().generate(extraction)
+
+    assert result.limitations == [first]
+
+
+def test_only_contextual_design_labels_use_fixed_transparent_limitation() -> None:
+    labels = (
+        "This was a cross-sectional study of adolescents. "
+        "Social media use was self-reported. "
+        "Participants completed a self-report questionnaire."
+    )
+    result = ExtractiveResearchMapService().generate(
+        _extraction_with_limitation_text(labels)
+    )
+
+    assert result.limitations == [_FIXED_LIMITATION]
+
+
+def test_real_title_rejection_does_not_change_findings_or_map_shape() -> None:
+    title = (
+        "Social media use and adolescent sleep patterns: cross-sectional findings "
+        "from the UK millennium cohort study."
+    )
+    findings = {
+        (
+            "Adolescents with frequent social media use were more likely to report "
+            "late sleep onset."
+        ),
+        (
+            "Higher nighttime social media use was associated with shorter sleep "
+            "duration."
+        ),
+        (
+            "A difference between weekday and weekend sleep patterns was observed "
+            "among participants."
+        ),
+    }
+    extraction = _extraction(
+        _chunk(1, title, section=None),
+        *(_chunk(index, finding) for index, finding in enumerate(sorted(findings), 2)),
+    )
+
+    result = ExtractiveResearchMapService().generate(extraction)
+
+    assert {finding.statement for finding in result.findings} == findings
+    assert result.limitations == [_FIXED_LIMITATION]
+    assert set(result.model_dump()) == {
+        "disclaimer",
+        "paper_id",
+        "research_question",
+        "findings",
+        "limitations",
+    }
 
 
 def test_fewer_than_three_eligible_findings_raises() -> None:
