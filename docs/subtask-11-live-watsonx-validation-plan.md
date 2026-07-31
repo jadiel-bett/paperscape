@@ -1759,3 +1759,44 @@ evidence-level terminology while preferring removal of unsupported numeric,
 threshold, ratio, outcome, and exception detail. Validation was not weakened,
 the initial prompt and one-retry limit remain unchanged, and no live or paid
 call occurred during implementation.
+
+## 28. Bounded lexical claim-support guard
+
+The recorded conservative retry succeeded operationally, but manual review
+accepted only the first finding and rejected the second and third. Exact
+provenance and numeric-detail validation were insufficient for those
+nonnumeric claims, which introduced outcomes not meaningfully named by their
+cited evidence.
+
+Resolved findings now require at least one contiguous two-token lexical anchor
+within one individual cited span. The private normalizer applies only Unicode
+NFKC, case folding, punctuation-to-boundary handling, and whitespace
+normalization. A small domain-agnostic stop/boilerplate set excludes generic
+relation wording, and overlap made up only of terms already in the research
+question (such as `social media use` or `sleep patterns`) is insufficient.
+
+`INSUFFICIENT_LEXICAL_SUPPORT` is a safe diagnostic. Its corrective guidance
+requires direct evidence terminology, a different span when the current span
+does not name the outcome, and concise findings; it does not include failed
+output, missing phrases, or source text. No stemming, lemmatization, synonym,
+fuzzy, embedding, reordering, or semantic matching was introduced. Existing
+unknown-ID isolation, duplicate-set, numeric-detail, and individual-span
+validation remain independent, including combined diagnostics. Public models,
+provenance, APIs, provider-call bounds, and retry count are unchanged. No live
+call occurred for this implementation.
+
+## 29. Deterministic integration fixture lexical-support remediation
+
+The complete deterministic suite exposed a stale happy-path fixture: its fake
+provider assumed positional evidence IDs and the three finding selections
+collided under the existing duplicate-set validation after lexical support was
+enabled. Production lexical validation was not weakened.
+
+The fake provider now selects opaque evidence IDs by unambiguous source phrases
+from the real evidence catalogue, including `extracts selectable text`,
+`chunk identifiers and one-based pages`, and `limitations remain visible`. The
+one-page selectable PDF fixture was padded with deterministic sentence
+boundaries so those phrases resolve to distinct evidence spans. The happy path
+now succeeds in one provider call, with public assertions for real chunk
+provenance, distinct finding evidence sets, and the expected lexical anchors.
+No live call occurred.

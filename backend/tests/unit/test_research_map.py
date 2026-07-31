@@ -25,6 +25,8 @@ from app.services.research_map import (
     _contains_critical_detail,
     _critical_details_supported,
     _extract_critical_details,
+    _has_lexical_anchor,
+    _normalize_lexical_tokens,
     _normalize_text,
     _split_evidence_text,
     _section_priority,
@@ -60,9 +62,24 @@ def _make_extraction(
 ) -> ExtractionResult:
     if chunks is None:
         chunks = [
-            _make_chunk(f"{paper_id}-p1-1", page=1, section="Abstract", text="Abstract content."),
-            _make_chunk(f"{paper_id}-p3-1", page=3, section="Results", text="Results content showing data."),
-            _make_chunk(f"{paper_id}-p4-1", page=4, section="Discussion", text="Discussion of findings."),
+            _make_chunk(
+                f"{paper_id}-p1-1",
+                page=1,
+                section="Abstract",
+                text="Abstract content. Finding two support.",
+            ),
+            _make_chunk(
+                f"{paper_id}-p3-1",
+                page=3,
+                section="Results",
+                text="Results content showing data. Finding one support.",
+            ),
+            _make_chunk(
+                f"{paper_id}-p4-1",
+                page=4,
+                section="Discussion",
+                text="Discussion of findings. Finding three support. A limitation support.",
+            ),
         ]
     return ExtractionResult(paper_id=paper_id, filename=filename, chunks=chunks)
 
@@ -181,6 +198,7 @@ def _specificity_validation_issues(
     evidence_texts: list[str],
     finding_statements: list[str],
     finding_evidence_ids: list[list[str]],
+    research_question: str = "What association was studied?",
 ) -> set[str]:
     """Validate a deterministic three-finding specificity fixture."""
     chunks = [
@@ -195,7 +213,7 @@ def _specificity_validation_issues(
     catalogue = _build_evidence_catalogue(chunks)
     response = {
         "research_question": {
-            "statement": "What association was studied?",
+            "statement": research_question,
             "evidence": [{"evidence_id": "E0001"}],
         },
         "findings": [
@@ -690,7 +708,7 @@ class TestGrounding:
         assert result.findings[0].evidence[0].model_dump() == {
             "chunk_id": "test-paper-id-p3-1",
             "page": 3,
-            "excerpt": "Results content showing data.",
+            "excerpt": "Results content showing data. Finding one support.",
         }
 
     @pytest.mark.parametrize("invalid_id", ["E9999", "e0002", " E0002 "])
@@ -764,7 +782,11 @@ class TestGrounding:
         assert provider.call_count == 2
 
     def test_different_evidence_ids_from_same_chunk_are_not_duplicates(self) -> None:
-        text = ("First exact sentence. " * 18) + ("Second exact sentence. " * 18)
+        text = (
+            ("Finding alpha exact sentence. " * 10)
+            + ("Finding beta exact sentence. " * 10)
+            + ("Finding gamma exact sentence. " * 10)
+        )
         extraction = _make_extraction(
             chunks=[_make_chunk("long", page=7, section="Results", text=text)]
         )
@@ -908,6 +930,158 @@ class TestEvidenceCatalogue:
 
 
 class TestClaimSpecificityGuard:
+    def test_lexical_token_normalization_is_conservative(self) -> None:
+        assert _normalize_lexical_tokens("Late\u00a0Sleep—Onset") == (
+            "late",
+            "sleep",
+            "onset",
+        )
+
+    def test_exact_late_sleep_onset_anchor_passes(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The study reported late sleep onset among heavier users.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Heavier users had late sleep onset.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_returning_to_sleep_without_an_exact_anchor_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "General sleep associations were reported, including late sleep onset.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Users had difficulty returning to sleep.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_overall_sleep_quality_without_an_exact_anchor_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The study described methods and screen-time wording.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Participants had poorer overall sleep quality.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_generic_social_media_overlap_alone_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Social media use was associated with outcomes.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Social media use was examined.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+            research_question=(
+                "Does social media use affect sleep patterns?"
+            ),
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_generic_sleep_patterns_overlap_alone_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Poorer sleep patterns were observed.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Sleep patterns were recorded.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+            research_question=(
+                "Does social media use affect sleep patterns?"
+            ),
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_poorer_sleep_patterns_passes_with_a_substantive_anchor(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Heavier use was associated with poorer sleep patterns.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Heavier use was associated with poorer sleep patterns.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+            research_question=(
+                "Does social media use affect sleep patterns?"
+            ),
+        )
+
+        assert issues == set()
+
+    def test_anchor_can_come_from_one_of_several_individual_spans(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "General sleep associations were observed.",
+                "Late sleep onset was reported.",
+                "A limitation was reported.",
+            ],
+            [
+                "Late sleep onset was reported.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001", "E0002"], ["E0001", "E0003"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_anchor_split_across_spans_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Late.",
+                "Onset was observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Late onset.",
+                "Onset was observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001", "E0002"], ["E0002", "E0003"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
     def test_real_bad_output_shape_fails_both_specificity_guards(self) -> None:
         """Detailed claims cannot all reuse one generic association span."""
         issues = _specificity_validation_issues(
@@ -930,6 +1104,7 @@ class TestClaimSpecificityGuard:
         assert issues == {
             _IssueCode.DUPLICATE_FINDING_EVIDENCE,
             _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT,
         }
 
     def test_distinct_specific_evidence_sets_are_accepted(self) -> None:
@@ -970,11 +1145,11 @@ class TestClaimSpecificityGuard:
         issues = _specificity_validation_issues(
             [
                 "The high-use threshold was 5+ hours.",
-                "The measured prevalence was 20.8%.",
+                "The measured prevalence was 20.8%. A broad secondary finding was reported.",
                 "A broad tertiary association was reported.",
             ],
             [
-                "The 5+ hour group had a prevalence of 20.8%.",
+                "The high-use threshold was 5+ hours and the measured prevalence was 20.8%.",
                 "A broad secondary finding was reported.",
                 "A broad tertiary finding was reported.",
             ],
@@ -998,7 +1173,10 @@ class TestClaimSpecificityGuard:
             [["E0001", "E0002"], ["E0002"], ["E0003"]],
         )
 
-        assert issues == {_IssueCode.UNSUPPORTED_CLAIM_DETAIL}
+        assert issues == {
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT,
+        }
 
     def test_findings_may_share_one_id_when_complete_sets_differ(self) -> None:
         issues = _specificity_validation_issues(
@@ -1034,6 +1212,23 @@ class TestClaimSpecificityGuard:
                 "A broad tertiary finding was reported.",
             ],
             [["UNKNOWN"], ["UNKNOWN"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNKNOWN_EVIDENCE_ID}
+
+    def test_unknown_evidence_id_does_not_cascade_to_lexical_support(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "A source phrase is present.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "An unrelated unsupported outcome was claimed.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["UNKNOWN"], ["E0002"], ["E0003"]],
         )
 
         assert issues == {_IssueCode.UNKNOWN_EVIDENCE_ID}
@@ -1345,8 +1540,89 @@ class TestRetry:
         assert result.findings[0].evidence[0].chunk_id == "test-paper-id-p3-1"
         assert result.findings[0].evidence[0].page == 3
         assert result.findings[0].evidence[0].excerpt == (
-            "Results content showing data."
+            "Results content showing data. Finding one support."
         )
+
+    def test_lexical_support_activates_issue_specific_retry_safely(self) -> None:
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["statement"] = "Unrelated outcome phrase."
+        invalid_json = json.dumps(invalid)
+        service, provider = _make_service(
+            responses=[invalid_json, _default_valid_response()]
+        )
+
+        result = service.generate_map(_make_extraction())
+
+        assert isinstance(result, ResearchMap)
+        assert provider.call_count == 2
+        corrective_prompt = provider.captured_prompts[1]
+        assert "INSUFFICIENT_LEXICAL_SUPPORT" in corrective_prompt
+        assert "BOUNDED LEXICAL-SUPPORT RETRY GUIDANCE" in corrective_prompt
+        assert "meaningful phrase of at least two consecutive tokens" in corrective_prompt
+        assert "terminology appearing directly in the cited evidence" in corrective_prompt
+        assert "Select a different evidence span" in corrective_prompt
+        assert "generic subject overlap alone" in corrective_prompt
+        assert invalid_json not in corrective_prompt
+
+    def test_lexical_and_quantitative_retry_guidance_composes(self) -> None:
+        invalid = _unsupported_detail_response("47.3%")
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        result = service.generate_map(_make_extraction())
+
+        assert isinstance(result, ResearchMap)
+        assert provider.call_count == 2
+        corrective_prompt = provider.captured_prompts[1]
+        assert "UNSUPPORTED_CLAIM_DETAIL" in corrective_prompt
+        assert "INSUFFICIENT_LEXICAL_SUPPORT" in corrective_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
+        assert "BOUNDED LEXICAL-SUPPORT RETRY GUIDANCE" in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert invalid not in corrective_prompt
+
+    def test_corrected_generic_overlap_still_fails(self) -> None:
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["statement"] = "Social media use."
+        # The research question already contains this generic subject phrase.
+        invalid["research_question"]["statement"] = (
+            "Does social media use affect sleep patterns?"
+        )
+        invalid_json = json.dumps(invalid)
+        extraction = _make_extraction(
+            chunks=[
+                _make_chunk(
+                    "test-paper-id-p1-1",
+                    page=1,
+                    section="Abstract",
+                    text="Abstract content. Finding two support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p3-1",
+                    page=3,
+                    section="Results",
+                    text="Social media use was associated with outcomes. Finding one support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p4-1",
+                    page=4,
+                    section="Discussion",
+                    text="Discussion of findings. Finding three support. A limitation support.",
+                ),
+            ]
+        )
+        service, provider = _make_service(
+            responses=[invalid_json, invalid_json]
+        )
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(extraction)
+
+        assert excinfo.value.issue_codes == {
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT
+        }
+        assert provider.call_count == 2
 
     def test_repeated_unsupported_detail_after_retry_still_fails(self) -> None:
         service, provider = _make_service(
@@ -1360,7 +1636,8 @@ class TestRetry:
             service.generate_map(_make_extraction())
 
         assert excinfo.value.issue_codes == {
-            _IssueCode.UNSUPPORTED_CLAIM_DETAIL
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT,
         }
         assert provider.call_count == 2
 
@@ -1556,6 +1833,10 @@ class TestIssueCodes:
             _IssueCode.UNSUPPORTED_CLAIM_DETAIL
             == "UNSUPPORTED_CLAIM_DETAIL"
         )
+        assert (
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT
+            == "INSUFFICIENT_LEXICAL_SUPPORT"
+        )
         assert _IssueCode.MISSING_LIMITATION == "MISSING_LIMITATION"
         assert _IssueCode.UNCERTAIN_CONFIDENCE == "UNCERTAIN_CONFIDENCE"
 
@@ -1589,19 +1870,19 @@ class TestIssueCodes:
                     "test-paper-id-p1-1",
                     page=1,
                     section="Abstract",
-                    text=f"Abstract content. {chunk_sentinel}",
+                    text=f"Abstract content. {chunk_sentinel} Finding two support.",
                 ),
                 _make_chunk(
                     "test-paper-id-p3-1",
                     page=3,
                     section="Results",
-                    text="Results content showing data.",
+                    text="Results content showing data. Finding one support.",
                 ),
                 _make_chunk(
                     "test-paper-id-p4-1",
                     page=4,
                     section="Discussion",
-                    text="Discussion of findings.",
+                    text="Discussion of findings. Finding three support.",
                 ),
             ]
         )
@@ -1628,6 +1909,50 @@ class TestIssueCodes:
         assert output_sentinel not in complete_log
         assert chunk_sentinel not in complete_log
 
+    def test_lexical_support_log_exposes_no_phrase_or_source_text(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        missing_phrase = "SENTINEL_MISSING_LEXICAL_PHRASE"
+        source_sentinel = "SENTINEL_LEXICAL_SOURCE_TEXT"
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["statement"] = missing_phrase
+        extraction = _make_extraction(
+            chunks=[
+                _make_chunk(
+                    "test-paper-id-p1-1",
+                    page=1,
+                    section="Abstract",
+                    text="Abstract content. Finding two support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p3-1",
+                    page=3,
+                    section="Results",
+                    text=f"Evidence anchor. {source_sentinel} Finding one support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p4-1",
+                    page=4,
+                    section="Discussion",
+                    text="Discussion of findings. Finding three support. A limitation support.",
+                ),
+            ]
+        )
+        service, _ = _make_service(
+            responses=[json.dumps(invalid), _default_valid_response()]
+        )
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        assert isinstance(service.generate_map(extraction), ResearchMap)
+        assert (
+            "Research map validation failed: attempt=1 "
+            "issue_codes=['INSUFFICIENT_LEXICAL_SUPPORT']"
+            in caplog.messages
+        )
+        assert missing_phrase not in caplog.text
+        assert source_sentinel not in caplog.text
+
     def test_unsupported_detail_log_does_not_include_expression_or_source(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -1644,19 +1969,19 @@ class TestIssueCodes:
                     "test-paper-id-p1-1",
                     page=1,
                     section="Abstract",
-                    text=f"Abstract content. {source_sentinel}",
+                    text=f"Abstract content. {source_sentinel} Finding two support.",
                 ),
                 _make_chunk(
                     "test-paper-id-p3-1",
                     page=3,
                     section="Results",
-                    text="Results content showing data.",
+                    text="Results content showing data. Finding one support.",
                 ),
                 _make_chunk(
                     "test-paper-id-p4-1",
                     page=4,
                     section="Discussion",
-                    text="Discussion of findings.",
+                    text="Discussion of findings. Finding three support.",
                 ),
             ]
         )
@@ -1668,7 +1993,8 @@ class TestIssueCodes:
         assert isinstance(service.generate_map(extraction), ResearchMap)
         assert (
             "Research map validation failed: attempt=1 "
-            "issue_codes=['UNSUPPORTED_CLAIM_DETAIL']"
+            "issue_codes=['INSUFFICIENT_LEXICAL_SUPPORT', "
+            "'UNSUPPORTED_CLAIM_DETAIL']"
             in caplog.messages
         )
         assert unsupported_expression not in caplog.text

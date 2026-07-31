@@ -50,11 +50,15 @@ def _make_selectable_pdf() -> bytes:
         page = doc.new_page()
         page.insert_text(
             (72, 72),
-            "PaperScape test study\n"
+            "PaperScape test study.\n"
             "Research question: Does a structured research map preserve evidence?\n"
             "Finding one: The prototype extracts selectable text from uploaded PDFs.\n"
+            "This first deterministic fixture paragraph provides a stable extraction boundary for the integration test.\n"
             "Finding two: Each finding keeps chunk identifiers and one-based pages.\n"
+            "This second deterministic fixture paragraph provides a stable extraction boundary for the integration test.\n"
+            "Extra deterministic separation text keeps the next finding in its own source span.\n"
             "Finding three: Limitations remain visible for expert review.\n"
+            "This third deterministic fixture paragraph provides a stable extraction boundary for the integration test.\n"
             "Limitation: This synthetic document has one page and a small sample.",
             fontsize=11,
         )
@@ -95,20 +99,36 @@ class DeterministicProvider(LLMProvider):
         assert max_tokens > 0
         assert 0.0 <= temperature <= 2.0
         context = _extract_context(prompt)
-        evidence_ids = [item["evidence_id"] for item in context]
-        assert len(evidence_ids) >= 2
-        if len(evidence_ids) >= 3:
-            finding_evidence_ids = [
-                [evidence_ids[0]],
-                [evidence_ids[1]],
-                [evidence_ids[2]],
+
+        def evidence_id_containing(required_phrase: str) -> str:
+            """Select one unambiguous catalogue span by exact source phrase."""
+            matches = [
+                item["evidence_id"]
+                for item in context
+                if required_phrase.casefold() in item["text"].casefold()
             ]
-        else:
-            finding_evidence_ids = [
-                [evidence_ids[0]],
-                [evidence_ids[1]],
-                evidence_ids,
-            ]
+            if not matches:
+                raise AssertionError(
+                    f"No evidence span contains fixture phrase {required_phrase!r}."
+                )
+            if len(matches) > 1:
+                raise AssertionError(
+                    f"Fixture phrase {required_phrase!r} matches multiple evidence spans: "
+                    f"{matches!r}."
+                )
+            return matches[0]
+
+        research_question_evidence_id = evidence_id_containing(
+            "structured research map preserve evidence"
+        )
+        finding_evidence_ids = [
+            [evidence_id_containing("extracts selectable text")],
+            [evidence_id_containing("chunk identifiers and one-based pages")],
+            [evidence_id_containing("limitations remain visible")],
+        ]
+        limitation_evidence_id = evidence_id_containing(
+            "synthetic document has one page and a small sample"
+        )
 
         def evidence(ids: list[str]) -> list[dict[str, Any]]:
             return [{"evidence_id": evidence_id} for evidence_id in ids]
@@ -117,7 +137,7 @@ class DeterministicProvider(LLMProvider):
             {
                 "research_question": {
                     "statement": "Does a structured research map preserve evidence?",
-                    "evidence": evidence([evidence_ids[0]]),
+                    "evidence": evidence([research_question_evidence_id]),
                 },
                 "findings": [
                     {
@@ -126,7 +146,7 @@ class DeterministicProvider(LLMProvider):
                         "confidence": "high",
                     },
                     {
-                        "statement": "Findings keep chunk identifiers and one-based page provenance.",
+                        "statement": "Each finding keeps chunk identifiers and one-based pages.",
                         "evidence": evidence(finding_evidence_ids[1]),
                         "confidence": "partial",
                     },
@@ -139,7 +159,7 @@ class DeterministicProvider(LLMProvider):
                 "limitations": [
                     {
                         "statement": "The test document is synthetic and intentionally small.",
-                        "evidence": evidence([evidence_ids[0]]),
+                        "evidence": evidence([limitation_evidence_id]),
                     }
                 ],
             }
@@ -263,13 +283,37 @@ def test_pipeline_generates_and_persists_research_map(tmp_path: Path) -> None:
         assert research_map["disclaimer"] == _DISCLAIMER
 
         real_chunk_ids = {chunk.chunk_id for chunk in persisted_extraction.chunks}
-        for finding in research_map["findings"]:
+        finding_evidence_sets: list[frozenset[tuple[str, int, str]]] = []
+        expected_anchors = [
+            "extracts selectable text",
+            "chunk identifiers and one-based pages",
+            "limitations remain visible",
+        ]
+        for finding, expected_anchor in zip(
+            research_map["findings"], expected_anchors, strict=True
+        ):
             assert finding["confidence"] in {"high", "partial"}
             assert finding["evidence"]
+            finding_evidence_sets.append(
+                frozenset(
+                    (
+                        evidence["chunk_id"],
+                        evidence["page"],
+                        evidence["excerpt"],
+                    )
+                    for evidence in finding["evidence"]
+                )
+            )
+            assert any(
+                expected_anchor.casefold() in evidence["excerpt"].casefold()
+                for evidence in finding["evidence"]
+            )
             for evidence in finding["evidence"]:
                 assert evidence["chunk_id"] in real_chunk_ids
                 assert evidence["page"] >= 1
                 assert evidence["excerpt"]
+
+        assert len(set(finding_evidence_sets)) == 3
 
         persisted_map = container.research_map_store.get(upload_data["paper_id"])
         assert persisted_map is not None

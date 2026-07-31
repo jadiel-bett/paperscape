@@ -4454,3 +4454,32 @@ requiring concise evidence-level associations, valid IDs, and distinct complete
 finding evidence sets while preferring removal of unsupported quantitative and
 compound detail. Validation was not weakened, no additional retry was added,
 and no live or paid call occurred during implementation.
+
+### Bounded lexical claim-support guard
+
+The recorded conservative retry succeeded operationally, but manual review
+accepted the first finding and rejected the second and third. Exact
+provenance and numeric validation were insufficient for these nonnumeric
+claims, so a bounded lexical-support guard was added.
+
+For each resolved finding, the guard matches contiguous token sequences of at
+least two tokens within one cited evidence span. It uses only NFKC, case
+folding, punctuation boundaries, whitespace normalization, a small explicit
+stop/boilerplate set, and exclusion of generic overlap already present in the
+research question. No semantic or fuzzy matching was introduced. The safe
+`INSUFFICIENT_LEXICAL_SUPPORT` code and issue-specific retry guidance do not
+log phrases, source text, or failed output. Unknown-ID isolation and all
+existing duplicate-set, numeric-detail, and individual-span checks remain
+unchanged. No live call occurred during this work.
+
+### Deterministic integration fixture lexical-support remediation
+
+The complete suite exposed a stale deterministic happy-path fixture. The
+fixture assumed positional evidence IDs, which no longer satisfied the
+production lexical guard and then collided under existing duplicate-set
+validation. Production validation was not weakened.
+
+The fake provider now selects IDs by exact phrases in the real evidence
+catalogue, and the one-page synthetic PDF has deterministic sentence
+boundaries for distinct finding spans. The happy path succeeds with one
+provider call; no live call occurred.

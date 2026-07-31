@@ -74,6 +74,7 @@ class _IssueCode:
     DUPLICATE_EVIDENCE = "DUPLICATE_EVIDENCE"
     DUPLICATE_FINDING_EVIDENCE = "DUPLICATE_FINDING_EVIDENCE"
     UNSUPPORTED_CLAIM_DETAIL = "UNSUPPORTED_CLAIM_DETAIL"
+    INSUFFICIENT_LEXICAL_SUPPORT = "INSUFFICIENT_LEXICAL_SUPPORT"
     MISSING_LIMITATION = "MISSING_LIMITATION"
     UNCERTAIN_CONFIDENCE = "UNCERTAIN_CONFIDENCE"
 
@@ -88,6 +89,7 @@ _SAFE_ISSUE_CODES: frozenset[str] = frozenset(
         _IssueCode.DUPLICATE_EVIDENCE,
         _IssueCode.DUPLICATE_FINDING_EVIDENCE,
         _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+        _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT,
         _IssueCode.MISSING_LIMITATION,
         _IssueCode.UNCERTAIN_CONFIDENCE,
     }
@@ -262,6 +264,88 @@ def _critical_details_supported(
         ):
             return False
     return True
+
+
+# This set is intentionally small and domain-agnostic. It excludes relation
+# boilerplate from qualifying as a meaningful lexical anchor without changing
+# the tokens used by any public field or source span.
+_LEXICAL_ANCHOR_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "associated",
+        "association",
+        "with",
+        "between",
+        "greater",
+        "higher",
+        "lower",
+        "more",
+        "less",
+        "was",
+        "were",
+        "is",
+        "are",
+        "the",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "and",
+        "or",
+        "as",
+        "than",
+        "for",
+        "by",
+        "on",
+        "from",
+    }
+)
+
+
+def _normalize_lexical_tokens(text: str) -> tuple[str, ...]:
+    """Return conservative tokens for the bounded lexical-support guard."""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
+    return tuple(normalized.split())
+
+
+def _has_lexical_anchor(
+    statement: str,
+    evidence_spans: Iterable[str],
+    research_question: str,
+) -> bool:
+    """Return whether one cited span contains a meaningful shared token run.
+
+    Matching is deliberately lexical only: tokens must remain contiguous in
+    both the finding and one individual evidence span. No stemming,
+    lemmatization, synonym expansion, fuzzy matching, reordering, embedding,
+    or semantic similarity is performed.
+    """
+    finding_tokens = _normalize_lexical_tokens(statement)
+    question_tokens = set(_normalize_lexical_tokens(research_question))
+    if len(finding_tokens) < 2:
+        return False
+
+    for span in evidence_spans:
+        span_tokens = _normalize_lexical_tokens(span)
+        span_ngrams = {
+            span_tokens[start : start + length]
+            for length in range(2, len(span_tokens) + 1)
+            for start in range(len(span_tokens) - length + 1)
+        }
+        for length in range(2, len(finding_tokens) + 1):
+            for start in range(len(finding_tokens) - length + 1):
+                sequence = finding_tokens[start : start + length]
+                if sequence not in span_ngrams:
+                    continue
+                if any(
+                    token not in _LEXICAL_ANCHOR_STOP_WORDS
+                    and token not in question_tokens
+                    for token in sequence
+                ):
+                    return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +876,20 @@ class ResearchMapService:
                 "evidence."
             )
 
+        if _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT in issue_codes:
+            issue_guidance.append(
+                "\n\nBOUNDED LEXICAL-SUPPORT RETRY GUIDANCE\n"
+                "- Preserve a meaningful phrase of at least two consecutive "
+                "tokens from at least one selected evidence span in every "
+                "finding.\n"
+                "- Use terminology appearing directly in the cited evidence.\n"
+                "- Select a different evidence span when the current evidence "
+                "does not directly name the claimed outcome.\n"
+                "- Do not rely on generic subject overlap alone, such as "
+                "'social media use' or 'sleep patterns'.\n"
+                "- Keep findings concise rather than combining several claims."
+            )
+
         correction_section = (
             "\n\nCORRECTION REQUIRED\n"
             "The previous response contained the following issues:\n"
@@ -974,6 +1072,7 @@ class ResearchMapService:
 
         # Each critical detail must occur wholly within at least one selected
         # span. Different spans may support different details.
+        research_question = internal_map.research_question.statement
         for finding, resolved_spans in resolved_findings:
             evidence_spans = [
                 span.text
@@ -984,6 +1083,12 @@ class ResearchMapService:
                 evidence_spans,
             ):
                 issues.add(_IssueCode.UNSUPPORTED_CLAIM_DETAIL)
+            if not _has_lexical_anchor(
+                finding.statement,
+                evidence_spans,
+                research_question,
+            ):
+                issues.add(_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT)
 
         # Check evidence presence for all grounded statements.
         if not internal_map.research_question.evidence:
