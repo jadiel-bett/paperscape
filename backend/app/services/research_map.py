@@ -732,12 +732,73 @@ class ResearchMapService:
             [span.evidence_id for span in evidence_catalogue]
         )
         codes_list = ", ".join(sorted(issue_codes))
+        issue_guidance: list[str] = []
+
+        if _IssueCode.UNKNOWN_EVIDENCE_ID in issue_codes:
+            issue_guidance.append(
+                "\n\nEXACT EVIDENCE-ID RETRY GUIDANCE\n"
+                "- Use only evidence_id values from the Valid evidence IDs list.\n"
+                "- Copy every evidence_id exactly, including its case.\n"
+                "- Do not invent or alter evidence IDs."
+            )
+
+        if _IssueCode.DUPLICATE_FINDING_EVIDENCE in issue_codes:
+            issue_guidance.append(
+                "\n\nDISTINCT FINDING EVIDENCE-SET RETRY GUIDANCE\n"
+                "- Use a different complete evidence-ID set for every finding.\n"
+                "- Findings may share an individual evidence ID only when their "
+                "complete evidence-ID sets differ."
+            )
+
+        if _IssueCode.UNSUPPORTED_CLAIM_DETAIL in issue_codes:
+            issue_guidance.append(
+                "\n\nCONSERVATIVE SPECIFICITY RETRY MODE\n"
+                "Regenerate the complete JSON object from scratch.\n"
+                "1. Return exactly three findings.\n"
+                "2. Return at least one limitation.\n"
+                "3. Continue using only valid evidence IDs.\n"
+                "4. Use a different complete evidence-ID set for every finding.\n"
+                "5. State one concise qualitative association per finding.\n"
+                "6. Keep each finding at the exact specificity level supported "
+                "by its cited evidence.\n"
+                "7. Prefer terminology that appears directly in the cited "
+                "evidence spans.\n"
+                "8. Select multiple evidence IDs when one span is insufficient.\n\n"
+                "For finding statements, do not use quantitative expressions "
+                "unless the selected evidence contains each complete expression "
+                "exactly within an individual cited span. This includes:\n"
+                "- digits, decimals, and signed quantities;\n"
+                "- percentages, odds ratios, and confidence intervals;\n"
+                "- numeric ranges, symbolic comparators, and plus-suffix "
+                "thresholds;\n"
+                "- ratios and number words zero through twenty;\n"
+                "- threshold-defined categories whose defining threshold is not "
+                "stated in the cited evidence;\n"
+                "- compound claims combining several unsupported outcomes or "
+                "exceptions.\n\n"
+                "Avoid exact usage-hour categories, exact counts, 'all six', "
+                "precise exceptions, and numerical effect sizes unless the "
+                "selected evidence contains those details exactly. For this "
+                "conservative retry, prefer removing quantitative detail rather "
+                "than trying to restate it.\n\n"
+                "Acceptable fallback forms include:\n"
+                "- 'Heavier social media use was associated with poorer sleep "
+                "patterns.'\n"
+                "- 'Greater social media use was associated with later sleep "
+                "timing.'\n"
+                "- 'Greater social media use was associated with difficulty "
+                "returning to sleep.'\n"
+                "These are format examples only. Use only the supplied paper "
+                "evidence."
+            )
+
         correction_section = (
             "\n\nCORRECTION REQUIRED\n"
             "The previous response contained the following issues:\n"
             f"{codes_list}\n\n"
             "Valid evidence IDs:\n"
-            f"{valid_evidence_ids}\n\n"
+            f"{valid_evidence_ids}"
+            f"{''.join(issue_guidance)}\n\n"
             "Regenerate the complete JSON research map. "
             "Return ONLY valid JSON. No markdown fences, prose, or commentary."
         )

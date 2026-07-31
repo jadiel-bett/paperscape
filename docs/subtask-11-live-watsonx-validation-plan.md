@@ -1743,3 +1743,19 @@ signs, range punctuation, and slash/colon ratios. Regressions cover those
 negative cases plus exact bare, percentage, suffix-plus, signed, comparator,
 range, decimal, and confidence-interval matches. No prompt, extraction,
 public API, or provider behavior changed, and no live call occurred.
+
+## 27. Issue-specific conservative specificity retry
+
+The next real PDF run confirmed the specificity guard was functioning: both the
+initial response and the existing generic corrective response were rejected
+with `UNSUPPORTED_CLAIM_DETAIL` because their quantitative details did not occur
+wholly within any cited individual span. The generic correction was therefore
+insufficient for this failure mode.
+
+The existing single corrective attempt now adds an issue-specific conservative
+qualitative fallback when that code is present. It requests three concise
+qualitative associations, distinct complete evidence-ID sets, exact-ID use, and
+evidence-level terminology while preferring removal of unsupported numeric,
+threshold, ratio, outcome, and exception detail. Validation was not weakened,
+the initial prompt and one-retry limit remain unchanged, and no live or paid
+call occurred during implementation.

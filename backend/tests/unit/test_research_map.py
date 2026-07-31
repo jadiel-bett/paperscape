@@ -128,6 +128,15 @@ def _default_valid_response() -> str:
     )
 
 
+def _unsupported_detail_response(detail: str = "47.3%") -> str:
+    """Return a valid-shape response with one unsupported quantitative detail."""
+    response = json.loads(_default_valid_response())
+    response["findings"][0]["statement"] = (
+        f"The unsupported quantitative detail was {detail}."
+    )
+    return json.dumps(response)
+
+
 def _single_evidence_response() -> str:
     """Return a valid internal map using three distinct finding evidence sets."""
     return json.dumps(
@@ -1303,6 +1312,99 @@ class TestRetry:
         extraction = _make_extraction()
         result = service.generate_map(extraction)
         assert isinstance(result, ResearchMap)
+        assert provider.call_count == 2
+
+    def test_unsupported_detail_activates_conservative_retry_safely(self) -> None:
+        unsupported_detail = "47.3%"
+        invalid = _unsupported_detail_response(unsupported_detail)
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        result = service.generate_map(_make_extraction())
+
+        assert provider.call_count == 2
+        initial_prompt, corrective_prompt = provider.captured_prompts
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" not in initial_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
+        assert "UNSUPPORTED_CLAIM_DETAIL" in corrective_prompt
+        assert invalid not in corrective_prompt
+        assert unsupported_detail not in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert "State one concise qualitative association per finding" in corrective_prompt
+        assert "prefer removing quantitative detail" in corrective_prompt
+
+        # The successful fallback still converts through the unchanged public model.
+        assert isinstance(result, ResearchMap)
+        assert result.paper_id == "test-paper-id"
+        assert [finding.statement for finding in result.findings] == [
+            "Finding one.",
+            "Finding two.",
+            "Finding three.",
+        ]
+        assert result.findings[0].evidence[0].chunk_id == "test-paper-id-p3-1"
+        assert result.findings[0].evidence[0].page == 3
+        assert result.findings[0].evidence[0].excerpt == (
+            "Results content showing data."
+        )
+
+    def test_repeated_unsupported_detail_after_retry_still_fails(self) -> None:
+        service, provider = _make_service(
+            responses=[
+                _unsupported_detail_response("47.3%"),
+                _unsupported_detail_response("88.8%"),
+            ]
+        )
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(_make_extraction())
+
+        assert excinfo.value.issue_codes == {
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL
+        }
+        assert provider.call_count == 2
+
+    def test_invalid_schema_does_not_activate_conservative_retry(self) -> None:
+        invalid = json.dumps({"findings": [], "limitations": []})
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        service.generate_map(_make_extraction())
+
+        corrective_prompt = provider.captured_prompts[1]
+        assert "INVALID_SCHEMA" in corrective_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" not in corrective_prompt
+
+    def test_combined_issue_guidance_is_composed_without_response_leakage(
+        self,
+    ) -> None:
+        unsupported_detail = "47.3%"
+        invalid_map = json.loads(_unsupported_detail_response(unsupported_detail))
+        invalid_map["findings"][1]["evidence"] = [
+            {"evidence_id": "E0002"}
+        ]
+        invalid_map["findings"][2]["evidence"] = [
+            {"evidence_id": "UNKNOWN"}
+        ]
+        invalid = json.dumps(invalid_map)
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        service.generate_map(_make_extraction())
+
+        corrective_prompt = provider.captured_prompts[1]
+        assert "UNSUPPORTED_CLAIM_DETAIL" in corrective_prompt
+        assert "DUPLICATE_FINDING_EVIDENCE" in corrective_prompt
+        assert "UNKNOWN_EVIDENCE_ID" in corrective_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
+        assert "DISTINCT FINDING EVIDENCE-SET RETRY GUIDANCE" in corrective_prompt
+        assert "EXACT EVIDENCE-ID RETRY GUIDANCE" in corrective_prompt
+        assert "Use a different complete evidence-ID set for every finding" in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert invalid not in corrective_prompt
+        assert unsupported_detail not in corrective_prompt
         assert provider.call_count == 2
 
     def test_only_two_model_calls_max(self) -> None:

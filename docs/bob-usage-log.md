@@ -4443,3 +4443,14 @@ signed values, larger numbers, and slash/colon ratios, while preserving exact
 bare, percentage, suffix-plus, signed, comparator, range, decimal, and
 confidence-interval matches. Regression coverage was added for each case. No
 prompt or public API behavior changed, and no live call occurred.
+
+### Issue-specific conservative specificity retry
+
+The next real PDF run produced `UNSUPPORTED_CLAIM_DETAIL` on both the initial
+and generic corrective attempts. This confirmed the guard was functioning, but
+also showed that the generic correction was insufficient. The existing single
+corrective attempt now adds a conservative qualitative fallback for this issue,
+requiring concise evidence-level associations, valid IDs, and distinct complete
+finding evidence sets while preferring removal of unsupported quantitative and
+compound detail. Validation was not weakened, no additional retry was added,
+and no live or paid call occurred during implementation.
