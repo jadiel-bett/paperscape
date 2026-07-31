@@ -154,6 +154,125 @@ def _unsupported_detail_response(detail: str = "47.3%") -> str:
     return json.dumps(response)
 
 
+def _make_corrective_contract_extraction() -> ExtractionResult:
+    """Return source spans for the two-attempt corrective-contract regression."""
+    return _make_extraction(
+        chunks=[
+            _make_chunk(
+                "corrective-p1-1",
+                page=1,
+                section="Results",
+                text=(
+                    "Social media use was recorded. "
+                    "Late sleep onset was observed."
+                ),
+            ),
+            _make_chunk(
+                "corrective-p2-1",
+                page=2,
+                section="Results",
+                text=(
+                    "Sleep patterns were recorded. "
+                    "Sleep duration was observed."
+                ),
+            ),
+            _make_chunk(
+                "corrective-p3-1",
+                page=3,
+                section="Discussion",
+                text=(
+                    "UK adolescents were studied. "
+                    "Waking time was observed. A limitation support."
+                ),
+            ),
+        ]
+    )
+
+
+def _corrective_contract_response(
+    finding_statements: tuple[str, str, str],
+    finding_evidence_ids: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
+) -> str:
+    """Return a complete response for corrective-contract regression tests."""
+    return json.dumps(
+        {
+            "research_question": {
+                "statement": (
+                    "How are social media use and sleep patterns described "
+                    "in UK adolescents?"
+                ),
+                "evidence": [{"evidence_id": "E0001"}],
+            },
+            "findings": [
+                {
+                    "statement": statement,
+                    "evidence": [
+                        {"evidence_id": evidence_id}
+                        for evidence_id in evidence_ids
+                    ],
+                    "confidence": "high",
+                }
+                for statement, evidence_ids in zip(
+                    finding_statements,
+                    finding_evidence_ids,
+                    strict=True,
+                )
+            ],
+            "limitations": [
+                {
+                    "statement": "A limitation was reported.",
+                    "evidence": [{"evidence_id": "E0003"}],
+                }
+            ],
+        }
+    )
+
+
+def _duplicate_and_unsupported_contract_response() -> str:
+    """Return a lexically anchored response with exactly two grounding issues."""
+    return _corrective_contract_response(
+        (
+            "Late sleep onset was observed in 47.3%.",
+            "Sleep duration was observed.",
+            "Waking time was observed.",
+        ),
+        (
+            ("E0001", "E0002"),
+            ("E0001", "E0002"),
+            ("E0003",),
+        ),
+    )
+
+
+def _assert_universal_corrective_contract(prompt: str) -> None:
+    """Assert the unconditional final-response contract is complete."""
+    assert prompt.count("FINAL CORRECTIVE RESPONSE CONTRACT") == 1
+    required_instructions = (
+        "Regenerate the complete JSON object from scratch",
+        "Return exactly three findings and at least one limitation",
+        "Use only exact valid evidence IDs from the supplied catalogue",
+        "Give every finding a distinct complete evidence-ID set",
+        "State one concise association per finding",
+        "Preserve association language and avoid causal claims",
+        "meaningful contiguous phrase of at least two words appearing exactly",
+        "names the claimed outcome, observation, comparison, or limitation",
+        "social media use",
+        "sleep patterns",
+        "UK adolescents",
+        "complete exact expression appears inside one individual cited evidence span",
+        "Remove numerical detail when exact support is uncertain",
+        "Prefer one strong evidence ID per finding",
+        "selected evidence directly supports the entire statement",
+        "Select the supporting evidence span first",
+        "Preserve a short exact phrase from that span",
+        "preserved phrase names the finding's actual outcome",
+        "Then return only the required JSON",
+        "Do not provide chain-of-thought",
+    )
+    for instruction in required_instructions:
+        assert instruction in prompt
+
+
 def _single_evidence_response() -> str:
     """Return a valid internal map using three distinct finding evidence sets."""
     return json.dumps(
@@ -1498,6 +1617,9 @@ class TestRetry:
         extraction = _make_extraction()
         service.generate_map(extraction)
         assert provider.call_count == 2
+        initial_prompt, corrective_prompt = provider.captured_prompts
+        assert "FINAL CORRECTIVE RESPONSE CONTRACT" not in initial_prompt
+        _assert_universal_corrective_contract(corrective_prompt)
 
     def test_valid_corrective_response_succeeds(self) -> None:
         """Corrective retry returns valid response → success."""
@@ -1523,6 +1645,7 @@ class TestRetry:
         assert "CONSERVATIVE SPECIFICITY RETRY MODE" not in initial_prompt
         assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
         assert "UNSUPPORTED_CLAIM_DETAIL" in corrective_prompt
+        _assert_universal_corrective_contract(corrective_prompt)
         assert invalid not in corrective_prompt
         assert unsupported_detail not in corrective_prompt
         assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
@@ -1650,8 +1773,118 @@ class TestRetry:
         service.generate_map(_make_extraction())
 
         corrective_prompt = provider.captured_prompts[1]
-        assert "INVALID_SCHEMA" in corrective_prompt
+        issue_section = corrective_prompt.split(
+            "The previous response contained the following issues:\n", 1
+        )[1].split("\n\nValid evidence IDs:", 1)[0]
+        assert issue_section == _IssueCode.INVALID_SCHEMA
         assert "CONSERVATIVE SPECIFICITY RETRY MODE" not in corrective_prompt
+        _assert_universal_corrective_contract(corrective_prompt)
+        assert invalid not in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+
+    def test_unknown_evidence_id_only_retains_universal_contract(self) -> None:
+        failed_statement = "SENTINEL_FAILED_FINDING_STATEMENT"
+        invalid_map = json.loads(_default_valid_response())
+        invalid_map["findings"][0]["statement"] = failed_statement
+        invalid_map["findings"][0]["evidence"] = [
+            {"evidence_id": "UNKNOWN"}
+        ]
+        invalid = json.dumps(invalid_map)
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        assert isinstance(service.generate_map(_make_extraction()), ResearchMap)
+
+        corrective_prompt = provider.captured_prompts[1]
+        issue_section = corrective_prompt.split(
+            "The previous response contained the following issues:\n", 1
+        )[1].split("\n\nValid evidence IDs:", 1)[0]
+        assert issue_section == _IssueCode.UNKNOWN_EVIDENCE_ID
+        _assert_universal_corrective_contract(corrective_prompt)
+        assert "EXACT EVIDENCE-ID RETRY GUIDANCE" in corrective_prompt
+        assert invalid not in corrective_prompt
+        assert failed_statement not in corrective_prompt
+        assert '"UNKNOWN"' not in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert provider.call_count == 2
+
+    def test_duplicate_and_detail_correction_succeeds_with_exact_anchors(
+        self,
+    ) -> None:
+        invalid = _duplicate_and_unsupported_contract_response()
+        corrected = _corrective_contract_response(
+            (
+                "Late sleep onset was observed.",
+                "Sleep duration was observed.",
+                "Waking time was observed.",
+            ),
+            (("E0001",), ("E0002",), ("E0003",)),
+        )
+        service, provider = _make_service(responses=[invalid, corrected])
+
+        result = service.generate_map(_make_corrective_contract_extraction())
+
+        assert isinstance(result, ResearchMap)
+        assert provider.call_count == 2
+        corrective_prompt = provider.captured_prompts[1]
+        issue_section = corrective_prompt.split(
+            "The previous response contained the following issues:\n", 1
+        )[1].split("\n\nValid evidence IDs:", 1)[0]
+        assert set(issue_section.split(", ")) == {
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+        }
+        assert _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT not in issue_section
+        _assert_universal_corrective_contract(corrective_prompt)
+        assert "DISTINCT FINDING EVIDENCE-SET RETRY GUIDANCE" in corrective_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
+        assert "BOUNDED LEXICAL-SUPPORT RETRY GUIDANCE" not in corrective_prompt
+        assert invalid not in corrective_prompt
+        assert "Late sleep onset was observed in 47.3%." not in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert [finding.statement for finding in result.findings] == [
+            "Late sleep onset was observed.",
+            "Sleep duration was observed.",
+            "Waking time was observed.",
+        ]
+        assert result.findings[0].evidence[0].model_dump() == {
+            "chunk_id": "corrective-p1-1",
+            "page": 1,
+            "excerpt": (
+                "Social media use was recorded. "
+                "Late sleep onset was observed."
+            ),
+        }
+
+    def test_duplicate_and_detail_correction_with_generic_overlap_fails(
+        self,
+    ) -> None:
+        invalid = _duplicate_and_unsupported_contract_response()
+        generic_correction = _corrective_contract_response(
+            ("Social media use.", "Sleep patterns.", "UK adolescents."),
+            (("E0001",), ("E0002",), ("E0003",)),
+        )
+        service, provider = _make_service(
+            responses=[invalid, generic_correction]
+        )
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(_make_corrective_contract_extraction())
+
+        assert excinfo.value.issue_codes == {
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT
+        }
+        assert provider.call_count == 2
+        corrective_prompt = provider.captured_prompts[1]
+        issue_section = corrective_prompt.split(
+            "The previous response contained the following issues:\n", 1
+        )[1].split("\n\nValid evidence IDs:", 1)[0]
+        assert set(issue_section.split(", ")) == {
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+        }
+        _assert_universal_corrective_contract(corrective_prompt)
 
     def test_combined_issue_guidance_is_composed_without_response_leakage(
         self,
@@ -1679,8 +1912,10 @@ class TestRetry:
         assert "DISTINCT FINDING EVIDENCE-SET RETRY GUIDANCE" in corrective_prompt
         assert "EXACT EVIDENCE-ID RETRY GUIDANCE" in corrective_prompt
         assert "Use a different complete evidence-ID set for every finding" in corrective_prompt
+        _assert_universal_corrective_contract(corrective_prompt)
         assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
         assert invalid not in corrective_prompt
+        assert invalid_map["findings"][0]["statement"] not in corrective_prompt
         assert unsupported_detail not in corrective_prompt
         assert provider.call_count == 2
 

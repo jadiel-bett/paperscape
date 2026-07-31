@@ -1800,3 +1800,22 @@ boundaries so those phrases resolve to distinct evidence spans. The happy path
 now succeeds in one provider call, with public assertions for real chunk
 provenance, distinct finding evidence sets, and the expected lexical anchors.
 No live call occurred.
+
+## 30. Unconditional final corrective-response contract
+
+The latest real job failed its first attempt with
+`DUPLICATE_FINDING_EVIDENCE` and `UNSUPPORTED_CLAIM_DETAIL`. Its corrective
+response fixed those issues but introduced unsupported qualitative findings,
+so attempt two failed `INSUFFICIENT_LEXICAL_SUPPORT` and the job ended with
+`map_generation_failed`. Because lexical guidance was conditional on the
+first-attempt codes, issue-specific guidance alone was insufficient under the
+existing two-call ceiling.
+
+Every corrective prompt now carries a compact complete grounding contract. It
+requires exact valid IDs, distinct complete evidence sets, concise
+association-language findings, an outcome-naming exact lexical anchor from one
+cited span, individual-span support for complete numeric expressions, and
+removal of uncertain detail. Existing issue-specific guidance remains as
+additional emphasis and composes with the universal contract. Validators, the
+initial prompt, public provenance, and provider-call bounds are unchanged. No
+live or paid call occurred during this implementation.

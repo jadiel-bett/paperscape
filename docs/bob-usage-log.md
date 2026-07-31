@@ -4483,3 +4483,19 @@ The fake provider now selects IDs by exact phrases in the real evidence
 catalogue, and the one-page synthetic PDF has deterministic sentence
 boundaries for distinct finding spans. The happy path succeeds with one
 provider call; no live call occurred.
+
+### Unconditional final corrective-response contract
+
+The latest real job first failed `DUPLICATE_FINDING_EVIDENCE` and
+`UNSUPPORTED_CLAIM_DETAIL`. Its corrective response fixed both but introduced
+unsupported qualitative findings, producing
+`INSUFFICIENT_LEXICAL_SUPPORT` on attempt two and a final
+`map_generation_failed`. Conditional first-attempt guidance was therefore
+insufficient under the fixed two-call limit.
+
+Every corrective prompt now includes the complete grounding contract:
+exact valid IDs, distinct evidence sets, concise noncausal associations,
+outcome-naming exact source phrases, individual-span numeric support, and
+removal of uncertain detail. Conditional issue-specific blocks still compose
+as additional emphasis. No validator, initial prompt, public provenance, or
+provider-call bound changed, and no live call occurred.

@@ -45,6 +45,38 @@ _DISCLAIMER: str = (
 )
 _CONTEXT_SENTINEL: str = "__PAPER_CONTEXT_JSON__"
 _MAX_EVIDENCE_SPAN_CHARS: int = 300
+_FINAL_CORRECTIVE_RESPONSE_CONTRACT: str = (
+    "FINAL CORRECTIVE RESPONSE CONTRACT\n"
+    "1. Regenerate the complete JSON object from scratch.\n"
+    "2. Return exactly three findings and at least one limitation.\n"
+    "3. Use only exact valid evidence IDs from the supplied catalogue.\n"
+    "4. Give every finding a distinct complete evidence-ID set.\n"
+    "5. State one concise association per finding.\n"
+    "6. Preserve association language and avoid causal claims.\n"
+    "7. Include in every finding a meaningful contiguous phrase of at least "
+    "two words appearing exactly in one of that finding's cited evidence "
+    "spans.\n"
+    "8. Ensure that phrase names the claimed outcome, observation, comparison, "
+    "or limitation rather than only repeating generic research-question "
+    "terms.\n"
+    "9. Do not rely only on generic subject overlap such as:\n"
+    "   - social media use\n"
+    "   - sleep patterns\n"
+    "   - UK adolescents\n"
+    "10. Use numerical details only when the complete exact expression appears "
+    "inside one individual cited evidence span.\n"
+    "11. Remove numerical detail when exact support is uncertain.\n"
+    "12. Prefer one strong evidence ID per finding; use additional IDs only "
+    "where genuinely necessary.\n"
+    "13. Keep findings short enough that the selected evidence directly "
+    "supports the entire statement.\n\n"
+    "CONSTRUCTION GUIDANCE\n"
+    "- Select the supporting evidence span first.\n"
+    "- Preserve a short exact phrase from that span in the finding statement.\n"
+    "- Ensure that the preserved phrase names the finding's actual outcome.\n"
+    "- Then return only the required JSON.\n"
+    "- Do not provide chain-of-thought, reasoning, prose, or commentary."
+)
 
 # Section-priority configuration.
 # Keys are lower-cased section keywords; values are the priority rank
@@ -895,7 +927,8 @@ class ResearchMapService:
             "The previous response contained the following issues:\n"
             f"{codes_list}\n\n"
             "Valid evidence IDs:\n"
-            f"{valid_evidence_ids}"
+            f"{valid_evidence_ids}\n\n"
+            f"{_FINAL_CORRECTIVE_RESPONSE_CONTRACT}"
             f"{''.join(issue_guidance)}\n\n"
             "Regenerate the complete JSON research map. "
             "Return ONLY valid JSON. No markdown fences, prose, or commentary."
