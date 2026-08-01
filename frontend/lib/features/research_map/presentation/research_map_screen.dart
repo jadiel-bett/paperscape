@@ -28,7 +28,9 @@ class _ResearchMapScreenState extends State<ResearchMapScreen> {
     super.dispose();
   }
 
-  void _changed() => setState(() {});
+  void _changed() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -430,7 +432,7 @@ class _UploadPanel extends StatelessWidget {
                       ),
                       if (state.phase != WorkflowPhase.idle)
                         TextButton(
-                          onPressed: isBusy ? null : onReset,
+                          onPressed: onReset,
                           child: const Text('Start over'),
                         ),
                     ],
@@ -782,17 +784,16 @@ class _MapView extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
-          Row(
+          Wrap(
+            spacing: 12,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Text('THE FINDINGS',
                   style: Theme.of(context)
                       .textTheme
                       .labelMedium
                       ?.copyWith(color: paperScapeBlue, letterSpacing: 1.4)),
-              const SizedBox(width: 10),
-              Expanded(
-                  child: Container(height: 1, color: const Color(0xFFD7E0EC))),
-              const SizedBox(width: 10),
               Text('${map.findings.length} TRACEABLE CLAIMS',
                   style: Theme.of(context).textTheme.labelMedium),
             ],
@@ -855,10 +856,9 @@ class _FindingCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Column(
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final number = Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
@@ -878,13 +878,8 @@ class _FindingCard extends StatelessWidget {
                                 fontSize: 9,
                                 letterSpacing: .4)),
                   ],
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                    child: SelectableText(finding.statement,
-                        style: Theme.of(context).textTheme.titleLarge)),
-                const SizedBox(width: 12),
-                Container(
+                );
+                final badge = Container(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
                   decoration: BoxDecoration(
@@ -902,8 +897,31 @@ class _FindingCard extends StatelessWidget {
                               fontWeight: FontWeight.w800)),
                     ],
                   ),
-                ),
-              ],
+                );
+                final statement = SelectableText(finding.statement,
+                    style: Theme.of(context).textTheme.titleLarge);
+
+                if (constraints.maxWidth < 480) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [number, const Spacer(), badge]),
+                      const SizedBox(height: 14),
+                      statement,
+                    ],
+                  );
+                }
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    number,
+                    const SizedBox(width: 14),
+                    Expanded(child: statement),
+                    const SizedBox(width: 12),
+                    badge,
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 17),
             ...finding.evidence

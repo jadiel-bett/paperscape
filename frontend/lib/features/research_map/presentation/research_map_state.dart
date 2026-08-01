@@ -46,6 +46,11 @@ class ResearchMapState {
   final bool isBusy;
   final int generation;
 
+  String? get uploadedPaperId {
+    final value = upload?.paperId.trim();
+    return value == null || value.isEmpty ? null : value;
+  }
+
   ResearchMapState copyWith(
           {WorkflowPhase? phase,
           SelectedPdf? selectedPdf,
@@ -60,6 +65,8 @@ class ResearchMapState {
           bool? isBusy,
           int? generation,
           bool clearPdf = false,
+          bool clearUpload = false,
+          bool clearJob = false,
           bool clearError = false,
           bool clearMap = false}) =>
       ResearchMapState(
@@ -69,9 +76,9 @@ class ResearchMapState {
             clearPdf ? null : selectedMetadata ?? this.selectedMetadata,
         validationError:
             clearError ? null : validationError ?? this.validationError,
-        upload: upload ?? this.upload,
-        jobId: jobId ?? this.jobId,
-        jobStatus: jobStatus ?? this.jobStatus,
+        upload: clearUpload ? null : upload ?? this.upload,
+        jobId: clearJob ? null : jobId ?? this.jobId,
+        jobStatus: clearJob ? null : jobStatus ?? this.jobStatus,
         map: clearMap ? null : map ?? this.map,
         errorMessage: clearError ? null : errorMessage ?? this.errorMessage,
         retryAction: retryAction ?? this.retryAction,

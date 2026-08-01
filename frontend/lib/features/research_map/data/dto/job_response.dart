@@ -23,17 +23,21 @@ class JobCreateResponse {
     required this.jobId,
     required this.paperId,
     required this.status,
+    this.createdAt,
   });
 
   final String jobId;
   final String paperId;
   final JobStatus status;
+  final DateTime? createdAt;
 
   factory JobCreateResponse.fromJson(Map<String, Object?> json) {
     return JobCreateResponse(
       jobId: _string(json['job_id']),
       paperId: _string(json['paper_id']),
       status: jobStatusFromJson(json['status']),
+      createdAt:
+          json['created_at'] == null ? null : _utcDate(json['created_at']),
     );
   }
 }

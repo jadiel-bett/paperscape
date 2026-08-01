@@ -88,8 +88,8 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.textContaining('Finding '), findsNWidgets(3));
     expect(find.byType(SelectableText), findsWidgets);
-    expect(find.textContaining('Page 1'), findsOneWidget);
-    expect(find.text('Limitations'), findsOneWidget);
+    expect(find.textContaining('PAGE 1'), findsOneWidget);
+    expect(find.text('LIMITATIONS'), findsOneWidget);
   });
 
   testWidgets('failure and processing controls are discoverable',

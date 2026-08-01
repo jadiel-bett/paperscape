@@ -39,6 +39,7 @@ class PaperScapeApiClient implements PaperScapeApi {
     MultipartFactory? multipartFactory,
     MultipartSender? multipartSender,
     this.timeout = const Duration(seconds: 30),
+    this.uploadTimeout = const Duration(minutes: 3),
   })  : _baseUri = Uri.parse(baseUrl),
         _ownsClient = client == null,
         _client = client ?? http.Client(),
@@ -52,6 +53,7 @@ class PaperScapeApiClient implements PaperScapeApi {
   final MultipartFactory _multipartFactory;
   final MultipartSender? _multipartSender;
   final Duration timeout;
+  final Duration uploadTimeout;
 
   Uri _uri(List<String> parts) => _baseUri.replace(pathSegments: [
         ..._baseUri.pathSegments.where((p) => p.isNotEmpty),
@@ -74,9 +76,9 @@ class PaperScapeApiClient implements PaperScapeApi {
     try {
       final streamed = await (_multipartSender ?? HttpMultipartSender(_client))
           .send(request)
-          .timeout(timeout);
+          .timeout(uploadTimeout);
       final response =
-          await http.Response.fromStream(streamed).timeout(timeout);
+          await http.Response.fromStream(streamed).timeout(uploadTimeout);
       return _decode(response, 201, UploadResponse.fromJson);
     } on TimeoutException {
       throw const ApiException(

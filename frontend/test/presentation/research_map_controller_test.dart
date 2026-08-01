@@ -139,6 +139,15 @@ class DelayedCreateApi extends FakeApi {
   }
 }
 
+class MalformedUploadApi extends FakeApi {
+  MalformedUploadApi() : super(statuses: [JobStatus.pending]);
+
+  @override
+  Future<UploadResponse> uploadPaper(SelectedPdf pdf) async =>
+      const UploadResponse(
+          paperId: '   ', filename: 'demo.pdf', pageCount: 1, chunkCount: 1);
+}
+
 class FakeApi implements PaperScapeApi {
   FakeApi(
       {required this.statuses,
@@ -272,6 +281,7 @@ void main() {
     await second;
     expect(api.lastPaperId, 'paper-1');
     expect(api.createJobCalls, 1);
+    expect(controller.state.upload?.paperId, 'paper-1');
   });
 
   test('pending then running then succeeded loads map once', () async {
@@ -297,25 +307,59 @@ void main() {
     expect(api.mapCalls, 1);
   });
 
-  test(
-      'poll transport retry uses same job and map retry does not create new job',
+  test('failed terminal job shows safe error and clears loading state',
       () async {
+    final api = FakeApi(statuses: [JobStatus.failed]);
+    final controller =
+        ResearchMapController(api: api, picker: FakePicker(samplePdf()));
+
+    await controller.selectPdf();
+    await controller.start();
+
+    expect(controller.state.phase, WorkflowPhase.failed);
+    expect(controller.state.errorMessage,
+        safeMessageForCode('map_generation_failed'));
+    expect(controller.state.isBusy, isFalse);
+    expect(controller.state.map, isNull);
+  });
+
+  test('poll and map failures retry by creating a new job', () async {
     final pollApi = FakeApi(statuses: [JobStatus.pending], throwOnPoll: true);
     final controller =
         ResearchMapController(api: pollApi, picker: FakePicker(samplePdf()));
     await controller.selectPdf();
     await controller.start();
-    expect(controller.state.retryAction, RetryAction.pollJob);
+    expect(controller.state.retryAction, RetryAction.createJob);
+    final pollCreateCalls = pollApi.createJobCalls;
+    await controller.retry();
+    expect(pollApi.createJobCalls, pollCreateCalls + 1);
 
-    final mapApi = FakeApi(statuses: [JobStatus.succeeded], throwOnMap: true);
+    final mapApi = FakeApi(
+        statuses: [JobStatus.succeeded, JobStatus.succeeded], throwOnMap: true);
     final controller2 =
         ResearchMapController(api: mapApi, picker: FakePicker(samplePdf()));
     await controller2.selectPdf();
     await controller2.start();
-    expect(controller2.state.retryAction, RetryAction.loadMap);
+    expect(controller2.state.retryAction, RetryAction.createJob);
     final callsBefore = mapApi.createJobCalls;
     await controller2.retry();
-    expect(mapApi.createJobCalls, callsBefore);
+    expect(mapApi.createJobCalls, callsBefore + 1);
+  });
+
+  test('malformed uploaded paper id fails locally without creating a job',
+      () async {
+    final api = MalformedUploadApi();
+    final controller =
+        ResearchMapController(api: api, picker: FakePicker(samplePdf()));
+
+    await controller.selectPdf();
+    await controller.start();
+
+    expect(api.createJobCalls, 0);
+    expect(controller.state.phase, WorkflowPhase.failed);
+    expect(controller.state.errorMessage,
+        safeMessageForCode('invalid_identifier'));
+    expect(controller.state.isBusy, isFalse);
   });
 
   test('reset clears file and results', () async {
@@ -525,7 +569,7 @@ void main() {
     expect(notifications, greaterThanOrEqualTo(1));
   });
 
-  test('timeout stops polling deterministically and retry resumes same job id',
+  test('timeout stops polling deterministically and retry creates a new job',
       () async {
     final api = FakeApi(statuses: [JobStatus.pending, JobStatus.pending]);
     final scheduler = TestScheduler();
@@ -550,12 +594,13 @@ void main() {
 
     expect(controller.state.phase, WorkflowPhase.failed);
     expect(controller.state.errorMessage, pollTimeoutMessage);
-    expect(controller.state.retryAction, RetryAction.pollJob);
+    expect(controller.state.retryAction, RetryAction.createJob);
     expect(api.createJobCalls, 1);
     expect(scheduler.callbacks, isEmpty);
 
     await controller.retry();
     expect(controller.state.phase, WorkflowPhase.polling);
+    expect(api.createJobCalls, 2);
   });
 
   test('poll overlap guard prevents concurrent poll requests', () async {
@@ -687,7 +732,7 @@ void main() {
     expect(api.polledJobIds.last, 'job-b');
   });
 
-  test('map-load retry reuses same paper id without creating another job',
+  test('map-load retry clears old error and creates a new job for same paper',
       () async {
     final api = ControlledApi();
     final controller =
@@ -725,9 +770,29 @@ void main() {
 
     final createCalls = api.createJobCalls;
     final pollCalls = api.pollCalls;
-    expect(controller.state.retryAction, RetryAction.loadMap);
+    expect(controller.state.retryAction, RetryAction.createJob);
+    expect(controller.state.errorMessage, isNotNull);
 
     final retryFuture = controller.retry();
+    final secondCreate =
+        await waitForCompleter(api.createJobCompleters, index: 1);
+    expect(controller.state.phase, WorkflowPhase.creatingJob);
+    expect(controller.state.errorMessage, isNull);
+    expect(controller.state.jobId, isNull);
+    secondCreate.complete(const JobCreateResponse(
+      jobId: 'job-b',
+      paperId: 'paper-1',
+      status: JobStatus.pending,
+    ));
+    final secondPoll = await waitForCompleter(api.pollCompleters, index: 1);
+    secondPoll.complete(JobStatusResponse(
+      jobId: 'job-b',
+      paperId: 'paper-1',
+      status: JobStatus.succeeded,
+      createdAt: DateTime.utc(2026),
+      updatedAt: DateTime.utc(2026),
+      error: null,
+    ));
     final secondMap = await waitForCompleter(api.mapCompleters, index: 1);
     secondMap.complete(ResearchMap.fromJson({
       'paper_id': 'paper-1',
@@ -761,9 +826,12 @@ void main() {
     await retryFuture;
 
     expect(api.mappedPaperIds.every((paperId) => paperId == 'paper-1'), isTrue);
-    expect(api.createJobCalls, createCalls);
-    expect(api.pollCalls, pollCalls);
+    expect(api.createJobCalls, createCalls + 1);
+    expect(api.pollCalls, pollCalls + 1);
+    expect(api.polledJobIds.last, 'job-b');
     expect(controller.state.phase, WorkflowPhase.ready);
+    expect(controller.state.errorMessage, isNull);
+    expect(controller.state.isBusy, isFalse);
   });
 
   test('reset clears workflow state and ignores in-flight completions',
@@ -800,6 +868,8 @@ void main() {
     expect(controller.state.jobStatus, isNull);
     expect(controller.state.map, isNull);
     expect(controller.state.errorMessage, isNull);
+    expect(controller.state.retryAction, RetryAction.none);
+    expect(controller.state.isBusy, isFalse);
 
     api.pollCompleters.first.complete(JobStatusResponse(
       jobId: 'job-a',

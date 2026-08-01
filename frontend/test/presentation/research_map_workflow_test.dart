@@ -121,10 +121,16 @@ void main() {
 
     await tester.pumpWidget(
         MaterialApp(home: ResearchMapScreen(controller: controller)));
-    await tester.tap(find.text('Select PDF'));
+    final selectPdf = find.text('Select PDF');
+    await tester.ensureVisible(selectPdf);
+    await tester.tap(selectPdf);
     await tester.pump();
-    await tester.tap(find.text('Generate research map'));
+    final generate = find.text('Generate research map');
+    await tester.ensureVisible(generate);
+    await tester.tap(generate);
     await tester.pump();
+    expect(find.text('The trail broke before the map was ready'), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
     scheduler.callbacks.removeAt(0)();
     await tester.pump();
     scheduler.callbacks.removeAt(0)();
@@ -136,9 +142,9 @@ void main() {
     expect(api.createdPaperId, 'paper-1');
     expect(api.polledJobId, 'job-1');
     expect(api.mapRequests, 1);
-    expect(find.text('Research question'), findsOneWidget);
+    expect(find.text('RESEARCH QUESTION'), findsOneWidget);
     expect(find.textContaining('Finding '), findsNWidgets(3));
-    expect(find.textContaining('Page 1'), findsOneWidget);
+    expect(find.textContaining('PAGE 1'), findsOneWidget);
     expect(
         find.text(
             'This AI-generated explanation is grounded in the uploaded document but does not replace expert review.'),
