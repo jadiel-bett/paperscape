@@ -18,9 +18,13 @@ from fastapi.responses import JSONResponse
 from app.config import Settings
 from app.repositories import ExtractionStore, JobStore, ResearchMapStore
 from app.services.extraction import ExtractionService
+from app.services.extractive_research_map import ExtractiveResearchMapService
 from app.services.llm_provider import WatsonxProvider
 from app.services.research_map import ResearchMapService
-from app.services.research_map_job_runner import ResearchMapJobRunner
+from app.services.research_map_job_runner import (
+    ExtractiveFallbackFactory,
+    ResearchMapJobRunner,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -72,6 +76,7 @@ class ServiceContainer:
     job_store: JobStore
     extraction_store: ExtractionStore
     research_map_store: ResearchMapStore
+    extractive_fallback_factory: ExtractiveFallbackFactory
     paper_id_factory: Callable[[], str]
     job_runner_factory: Callable[[], ResearchMapJobRunner] | None
     job_creation_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -97,6 +102,7 @@ def build_container(settings: Settings) -> ServiceContainer:
     job_store = JobStore(settings.db_path)
     extraction_store = ExtractionStore(settings.db_path)
     research_map_store = ResearchMapStore(settings.db_path)
+    extractive_fallback_factory: ExtractiveFallbackFactory = ExtractiveResearchMapService
 
     job_runner_factory: Callable[[], ResearchMapJobRunner] | None = None
 
@@ -109,6 +115,7 @@ def build_container(settings: Settings) -> ServiceContainer:
                 extraction_store=extraction_store,
                 research_map_store=research_map_store,
                 research_map_service=research_map_service,
+                extractive_fallback_factory=extractive_fallback_factory,
             )
 
         job_runner_factory = _build_job_runner
@@ -124,6 +131,7 @@ def build_container(settings: Settings) -> ServiceContainer:
         job_store=job_store,
         extraction_store=extraction_store,
         research_map_store=research_map_store,
+        extractive_fallback_factory=extractive_fallback_factory,
         paper_id_factory=lambda: str(uuid.uuid4()),
         job_runner_factory=job_runner_factory,
     )

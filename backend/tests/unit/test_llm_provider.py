@@ -36,11 +36,30 @@ _PROJECT_ID = "proj-abc-123"
 _MODEL_ID = "ibm/granite-test-v1"
 _PROMPT = "Summarise this paper."
 _GENERATED = "This paper studies X using Y."
+_DEFAULT_RESPONSE = object()
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def chat_response(
+    content: Any = _GENERATED,
+    *,
+    role: Any = "assistant",
+    finish_reason: Any = "stop",
+    choice_extra: dict[str, Any] | None = None,
+    message_extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the minimal pinned Chat response shape used by provider tests."""
+    message = {"role": role, "content": content}
+    if message_extra:
+        message.update(message_extra)
+    choice = {"message": message, "finish_reason": finish_reason}
+    if choice_extra:
+        choice.update(choice_extra)
+    return {"choices": [choice]}
 
 
 def make_settings() -> Settings:
@@ -57,7 +76,11 @@ def make_settings() -> Settings:
 class FakeModelInference:
     """Minimal fake that records calls and returns a configurable value."""
 
-    def __init__(self, return_value: Any = _GENERATED, side_effects: list | None = None) -> None:
+    def __init__(
+        self,
+        return_value: Any = _DEFAULT_RESPONSE,
+        side_effects: list | None = None,
+    ) -> None:
         """
         Parameters
         ----------
@@ -67,14 +90,21 @@ class FakeModelInference:
             If provided, consumed left-to-right.  Each entry is either a
             return value or an exception instance/class to raise.
         """
-        self._return_value = return_value
+        self._return_value = (
+            chat_response() if return_value is _DEFAULT_RESPONSE else return_value
+        )
         self._side_effects: list = list(side_effects) if side_effects else []
         self.call_count: int = 0
         self.calls: list[dict] = []  # each call's kwargs
 
-    def generate_text(self, *, prompt: str, params: dict, **_kwargs: Any) -> Any:
+    def chat(self, *, messages: list[dict], params: dict) -> Any:
         self.call_count += 1
-        self.calls.append({"prompt": prompt, "params": dict(params)})
+        self.calls.append(
+            {
+                "messages": [dict(message) for message in messages],
+                "params": dict(params),
+            }
+        )
         if self._side_effects:
             effect = self._side_effects.pop(0)
             if isinstance(effect, BaseException):
@@ -177,6 +207,13 @@ def test_api_key_unwrapped_into_credentials() -> None:
     assert creds.api_key == _API_KEY
 
 
+def test_tls_certificate_verification_is_explicitly_enabled() -> None:
+    """Explicit verification disables the pinned SDK's unverified fallback."""
+    _, factory, _ = make_provider()
+    creds = factory.build_kwargs["credentials"]
+    assert creds.verify is True
+
+
 def test_raw_key_not_retained_on_provider() -> None:
     """The raw API key string is not stored as any attribute on WatsonxProvider."""
     provider, _, _ = make_provider()
@@ -257,48 +294,44 @@ def test_prompt_passed_to_client() -> None:
     client = FakeModelInference()
     provider, _, _ = make_provider(client=client)
     provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
-    assert client.calls[0]["prompt"] == _PROMPT
+    assert client.calls[0]["messages"] == [{"role": "user", "content": _PROMPT}]
 
 
-def test_max_tokens_maps_to_max_new_tokens() -> None:
+def test_max_tokens_maps_to_max_completion_tokens() -> None:
     client = FakeModelInference()
     provider, _, _ = make_provider(client=client)
     provider.generate(_PROMPT, max_tokens=512, temperature=0.0)
     params = client.calls[0]["params"]
-    assert params["max_new_tokens"] == 512
+    assert params["max_completion_tokens"] == 512
 
 
 def test_output_whitespace_stripped() -> None:
-    client = FakeModelInference(return_value="  answer  \n")
+    client = FakeModelInference(return_value=chat_response("  answer  \n"))
     provider, _, _ = make_provider(client=client)
     result = provider.generate(_PROMPT, max_tokens=50, temperature=0.0)
     assert result == "answer"
 
 
 # ---------------------------------------------------------------------------
-# Section 4 — Generation parameters
+# Section 4 — Chat parameters
 # ---------------------------------------------------------------------------
 
 
-def test_temperature_zero_uses_greedy() -> None:
+def test_temperature_zero_is_passed_exactly() -> None:
     client = FakeModelInference()
     provider, _, _ = make_provider(client=client)
     provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
-    assert client.calls[0]["params"]["decoding_method"] == "greedy"
+    assert client.calls[0]["params"]["temperature"] == 0.0
 
 
-def test_temperature_zero_omits_temperature_key() -> None:
+def test_text_generation_only_parameters_are_absent() -> None:
     client = FakeModelInference()
     provider, _, _ = make_provider(client=client)
     provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
-    assert "temperature" not in client.calls[0]["params"]
-
-
-def test_positive_temperature_uses_sample() -> None:
-    client = FakeModelInference()
-    provider, _, _ = make_provider(client=client)
-    provider.generate(_PROMPT, max_tokens=100, temperature=0.1)
-    assert client.calls[0]["params"]["decoding_method"] == "sample"
+    params = client.calls[0]["params"]
+    assert "decoding_method" not in params
+    assert "max_new_tokens" not in params
+    assert "response_format" not in params
 
 
 def test_positive_temperature_includes_temperature_key() -> None:
@@ -308,18 +341,14 @@ def test_positive_temperature_includes_temperature_key() -> None:
     assert client.calls[0]["params"]["temperature"] == pytest.approx(0.7)
 
 
-def test_build_params_greedy_no_temperature() -> None:
+def test_build_params_zero_temperature() -> None:
     params = _build_params(max_tokens=100, temperature=0.0)
-    assert params["decoding_method"] == "greedy"
-    assert params["max_new_tokens"] == 100
-    assert "temperature" not in params
+    assert params == {"max_completion_tokens": 100, "temperature": 0.0}
 
 
-def test_build_params_sample_includes_temperature() -> None:
+def test_build_params_positive_temperature() -> None:
     params = _build_params(max_tokens=50, temperature=0.5)
-    assert params["decoding_method"] == "sample"
-    assert params["max_new_tokens"] == 50
-    assert params["temperature"] == pytest.approx(0.5)
+    assert params == {"max_completion_tokens": 50, "temperature": 0.5}
 
 
 # ---------------------------------------------------------------------------
@@ -392,52 +421,172 @@ def test_temperature_boundary_two_accepted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Section 6 — Response validation
+# Section 6 — Strict Chat response validation
 # ---------------------------------------------------------------------------
 
 
-def test_non_string_output_raises_llm_response_error() -> None:
+def test_non_dictionary_response_raises_llm_response_error() -> None:
     client = FakeModelInference(return_value=None)
     provider, _, _ = make_provider(client=client)
-    with pytest.raises(LLMResponseError):
+    with pytest.raises(LLMResponseError, match="chat_response_not_object"):
         provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
 
 
-def test_dict_output_raises_llm_response_error() -> None:
-    client = FakeModelInference(return_value={"results": [{"generated_text": "x"}]})
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"choices": None},
+        {"choices": {}},
+        {"choices": []},
+    ],
+)
+def test_missing_or_invalid_choices_rejected(response: object) -> None:
+    client = FakeModelInference(return_value=response)
     provider, _, _ = make_provider(client=client)
-    with pytest.raises(LLMResponseError):
+    with pytest.raises(LLMResponseError, match="chat_response_choices_invalid"):
         provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
 
 
-def test_list_output_raises_llm_response_error() -> None:
-    client = FakeModelInference(return_value=["text"])
+def test_malformed_first_choice_rejected() -> None:
+    client = FakeModelInference(return_value={"choices": ["not-an-object"]})
     provider, _, _ = make_provider(client=client)
-    with pytest.raises(LLMResponseError):
+    with pytest.raises(LLMResponseError, match="chat_response_choice_invalid"):
         provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
 
 
-def test_empty_string_output_raises_llm_response_error() -> None:
-    client = FakeModelInference(return_value="")
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"choices": [{}]},
+        {"choices": [{"message": None}]},
+        {"choices": [{"message": "not-an-object"}]},
+    ],
+)
+def test_missing_or_malformed_message_rejected(response: object) -> None:
+    client = FakeModelInference(return_value=response)
     provider, _, _ = make_provider(client=client)
-    with pytest.raises(LLMResponseError):
+    with pytest.raises(LLMResponseError, match="chat_response_message_invalid"):
         provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
 
 
-def test_whitespace_only_output_raises_llm_response_error() -> None:
-    client = FakeModelInference(return_value="   \n\t  ")
+@pytest.mark.parametrize("role", [None, "user", "system"])
+def test_missing_or_incorrect_assistant_role_rejected(role: object) -> None:
+    client = FakeModelInference(return_value=chat_response(role=role))
     provider, _, _ = make_provider(client=client)
-    with pytest.raises(LLMResponseError):
+    with pytest.raises(LLMResponseError, match="chat_response_role_invalid"):
+        provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+
+
+@pytest.mark.parametrize("location", ["choice", "message"])
+def test_refusal_rejected(
+    location: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "PRIVATE_REFUSAL_SENTINEL"
+    kwargs = (
+        {"choice_extra": {"refusal": sentinel}}
+        if location == "choice"
+        else {"message_extra": {"refusal": sentinel}}
+    )
+    client = FakeModelInference(return_value=chat_response(**kwargs))
+    provider, _, _ = make_provider(client=client)
+    with caplog.at_level(logging.DEBUG, logger="app.services.llm_provider"):
+        with pytest.raises(
+            LLMResponseError, match="chat_response_refused"
+        ) as exc_info:
+            provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+    assert sentinel not in str(exc_info.value)
+    assert sentinel not in repr(exc_info.value)
+    assert sentinel not in caplog.text
+
+
+def test_missing_content_rejected() -> None:
+    response = chat_response()
+    del response["choices"][0]["message"]["content"]
+    client = FakeModelInference(return_value=response)
+    provider, _, _ = make_provider(client=client)
+    with pytest.raises(LLMResponseError, match="chat_response_content_missing"):
+        provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+
+
+def test_non_string_content_rejected() -> None:
+    client = FakeModelInference(return_value=chat_response(["not", "text"]))
+    provider, _, _ = make_provider(client=client)
+    with pytest.raises(LLMResponseError, match="chat_response_content_not_string"):
+        provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+
+
+@pytest.mark.parametrize("content", ["", "   \n\t  "])
+def test_blank_content_rejected(content: str) -> None:
+    client = FakeModelInference(return_value=chat_response(content))
+    provider, _, _ = make_provider(client=client)
+    with pytest.raises(LLMResponseError, match="chat_response_content_empty"):
+        provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+
+
+@pytest.mark.parametrize("finish_reason", [None, 7])
+def test_missing_or_non_string_finish_reason_rejected(finish_reason: object) -> None:
+    client = FakeModelInference(
+        return_value=chat_response(finish_reason=finish_reason)
+    )
+    provider, _, _ = make_provider(client=client)
+    with pytest.raises(
+        LLMResponseError, match="chat_response_finish_reason_invalid"
+    ):
+        provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "tool_calls", "unknown"])
+def test_non_stop_finish_reason_rejected(finish_reason: str) -> None:
+    client = FakeModelInference(
+        return_value=chat_response(finish_reason=finish_reason)
+    )
+    provider, _, _ = make_provider(client=client)
+    with pytest.raises(LLMResponseError, match="chat_response_finish_not_stop"):
         provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
 
 
 def test_response_error_is_not_retried() -> None:
     """LLMResponseError must not trigger a retry — client called exactly once."""
-    client = FakeModelInference(return_value="")
-    provider, _, _ = make_provider(client=client)
+    client = FakeModelInference(return_value=chat_response(""))
+    provider, _, sleep_log = make_provider(client=client)
     with pytest.raises(LLMResponseError):
         provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
     assert client.call_count == 1
+    assert sleep_log == []
+
+
+def test_raw_response_content_not_exposed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "PRIVATE_RAW_RESPONSE_SENTINEL"
+    client = FakeModelInference(
+        return_value={"choices": sentinel, "other": {"raw": sentinel}}
+    )
+    provider, _, _ = make_provider(client=client)
+    with caplog.at_level(logging.DEBUG, logger="app.services.llm_provider"):
+        with pytest.raises(LLMResponseError) as exc_info:
+            provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+    assert sentinel not in str(exc_info.value)
+    assert sentinel not in repr(exc_info.value)
+    assert sentinel not in caplog.text
+
+
+def test_generated_content_not_exposed_for_incomplete_finish(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "PRIVATE_GENERATED_CONTENT_SENTINEL"
+    client = FakeModelInference(
+        return_value=chat_response(sentinel, finish_reason="length")
+    )
+    provider, _, _ = make_provider(client=client)
+    with caplog.at_level(logging.DEBUG, logger="app.services.llm_provider"):
+        with pytest.raises(LLMResponseError) as exc_info:
+            provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+    assert sentinel not in str(exc_info.value)
+    assert sentinel not in repr(exc_info.value)
+    assert sentinel not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -589,16 +738,19 @@ def _make_fake_transient() -> TransientLLMError:
 
 def test_transient_failure_retries_exactly_once() -> None:
     transient = _make_api_failure(429)
-    client = FakeModelInference(side_effects=[transient, _GENERATED])
+    client = FakeModelInference(side_effects=[transient, chat_response()])
     provider, _, _ = make_provider(client=client)
     result = provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
     assert result == _GENERATED
     assert client.call_count == 2
+    assert client.calls[0] == client.calls[1]
 
 
 def test_successful_retry_returns_text() -> None:
     transient = _make_api_failure(503)
-    client = FakeModelInference(side_effects=[transient, "retry result"])
+    client = FakeModelInference(
+        side_effects=[transient, chat_response("retry result")]
+    )
     provider, _, _ = make_provider(client=client)
     result = provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
     assert result == "retry result"
@@ -664,7 +816,7 @@ def test_unknown_exception_not_retried() -> None:
 
 def test_sleep_called_exactly_once_on_transient_retry() -> None:
     transient = _make_api_failure(429)
-    client = FakeModelInference(side_effects=[transient, _GENERATED])
+    client = FakeModelInference(side_effects=[transient, chat_response()])
     sleep_log: list = []
     provider, _, _ = make_provider(client=client, sleep_calls=sleep_log)
     provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
@@ -691,7 +843,7 @@ def test_sleep_not_called_on_non_transient_failure() -> None:
 
 def test_sleep_not_called_on_response_error() -> None:
     sleep_log: list = []
-    client = FakeModelInference(return_value="")
+    client = FakeModelInference(return_value=chat_response(""))
     provider, _, _ = make_provider(client=client, sleep_calls=sleep_log)
     with pytest.raises(LLMResponseError):
         provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
@@ -752,6 +904,30 @@ def test_prompt_not_in_exception_message(caplog: pytest.LogCaptureFixture) -> No
     assert secret_prompt not in caplog.text
 
 
+def test_sdk_response_text_not_in_public_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "PRIVATE_SDK_RESPONSE_BODY_SENTINEL"
+
+    class Response:
+        status_code = 500
+
+    class SdkFailure(Exception):
+        response = Response()
+
+        def __str__(self) -> str:
+            return sentinel
+
+    client = FakeModelInference(side_effects=[SdkFailure(), SdkFailure()])
+    provider, _, _ = make_provider(client=client)
+    with caplog.at_level(logging.DEBUG, logger="app.services.llm_provider"):
+        with pytest.raises(TransientLLMError) as exc_info:
+            provider.generate(_PROMPT, max_tokens=100, temperature=0.0)
+    assert sentinel not in str(exc_info.value)
+    assert sentinel not in repr(exc_info.value)
+    assert sentinel not in caplog.text
+
+
 def test_no_real_sleep_occurs() -> None:
     """Confirm the injected no-op sleep is used, not time.sleep."""
     import time as _time
@@ -766,7 +942,7 @@ def test_no_real_sleep_occurs() -> None:
     _time.sleep = _guard_sleep  # type: ignore[assignment]
     try:
         transient = _make_api_failure(429)
-        client = FakeModelInference(side_effects=[transient, _GENERATED])
+        client = FakeModelInference(side_effects=[transient, chat_response()])
         sleep_log: list = []
         provider, _, _ = make_provider(client=client, sleep_calls=sleep_log)
         result = provider.generate(_PROMPT, max_tokens=100, temperature=0.0)

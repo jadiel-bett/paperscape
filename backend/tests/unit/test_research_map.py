@@ -7,8 +7,8 @@ grounding, confidence handling, corrective retry, safety, and imports.
 from __future__ import annotations
 
 import json
+import logging
 import re
-import unicodedata
 from typing import Any
 
 import pytest
@@ -19,12 +19,21 @@ from app.models.research_map import ResearchMap
 from app.services.llm_provider import LLMProvider, LLMProviderError
 from app.services.research_map import (
     _CONTEXT_SENTINEL,
+    _MAX_EVIDENCE_SPAN_CHARS,
+    _EvidenceSpan,
+    _build_evidence_catalogue,
+    _contains_critical_detail,
+    _critical_details_supported,
+    _extract_critical_details,
+    _has_lexical_anchor,
+    _normalize_lexical_tokens,
     _normalize_text,
+    _split_evidence_text,
     _section_priority,
     _is_excluded_section,
     _head_and_tail_sort,
     _IssueCode,
-    _InternalEvidence,
+    _InternalEvidenceReference,
     _InternalFinding,
     _InternalGroundedStatement,
     _InternalResearchMap,
@@ -53,9 +62,24 @@ def _make_extraction(
 ) -> ExtractionResult:
     if chunks is None:
         chunks = [
-            _make_chunk(f"{paper_id}-p1-1", page=1, section="Abstract", text="Abstract content."),
-            _make_chunk(f"{paper_id}-p3-1", page=3, section="Results", text="Results content showing data."),
-            _make_chunk(f"{paper_id}-p4-1", page=4, section="Discussion", text="Discussion of findings."),
+            _make_chunk(
+                f"{paper_id}-p1-1",
+                page=1,
+                section="Abstract",
+                text="Abstract content. Finding two support.",
+            ),
+            _make_chunk(
+                f"{paper_id}-p3-1",
+                page=3,
+                section="Results",
+                text="Results content showing data. Finding one support.",
+            ),
+            _make_chunk(
+                f"{paper_id}-p4-1",
+                page=4,
+                section="Discussion",
+                text="Discussion of findings. Finding three support. A limitation support.",
+            ),
         ]
     return ExtractionResult(paper_id=paper_id, filename=filename, chunks=chunks)
 
@@ -89,29 +113,189 @@ def _default_valid_response() -> str:
         {
             "research_question": {
                 "statement": "What is the research question?",
-                "evidence": [{"chunk_id": "test-paper-id-p1-1", "page": 1, "excerpt": "Abstract content."}],
+                "evidence": [{"evidence_id": "E0001"}],
             },
             "findings": [
                 {
                     "statement": "Finding one.",
-                    "evidence": [{"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."}],
+                    "evidence": [{"evidence_id": "E0002"}],
                     "confidence": "high",
                 },
                 {
                     "statement": "Finding two.",
-                    "evidence": [{"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."}],
+                    "evidence": [
+                        {"evidence_id": "E0001"},
+                        {"evidence_id": "E0002"},
+                    ],
                     "confidence": "partial",
                 },
                 {
                     "statement": "Finding three.",
-                    "evidence": [{"chunk_id": "test-paper-id-p4-1", "page": 4, "excerpt": "Discussion of findings."}],
+                    "evidence": [{"evidence_id": "E0003"}],
                     "confidence": "high",
                 },
             ],
             "limitations": [
                 {
                     "statement": "A limitation.",
-                    "evidence": [{"chunk_id": "test-paper-id-p4-1", "page": 4, "excerpt": "Discussion of findings."}],
+                    "evidence": [{"evidence_id": "E0003"}],
+                }
+            ],
+        }
+    )
+
+
+def _unsupported_detail_response(detail: str = "47.3%") -> str:
+    """Return a valid-shape response with one unsupported quantitative detail."""
+    response = json.loads(_default_valid_response())
+    response["findings"][0]["statement"] = (
+        f"The unsupported quantitative detail was {detail}."
+    )
+    return json.dumps(response)
+
+
+def _make_corrective_contract_extraction() -> ExtractionResult:
+    """Return source spans for the two-attempt corrective-contract regression."""
+    return _make_extraction(
+        chunks=[
+            _make_chunk(
+                "corrective-p1-1",
+                page=1,
+                section="Results",
+                text=(
+                    "Social media use was recorded. "
+                    "Late sleep onset was observed."
+                ),
+            ),
+            _make_chunk(
+                "corrective-p2-1",
+                page=2,
+                section="Results",
+                text=(
+                    "Sleep patterns were recorded. "
+                    "Sleep duration was observed."
+                ),
+            ),
+            _make_chunk(
+                "corrective-p3-1",
+                page=3,
+                section="Discussion",
+                text=(
+                    "UK adolescents were studied. "
+                    "Waking time was observed. A limitation support."
+                ),
+            ),
+        ]
+    )
+
+
+def _corrective_contract_response(
+    finding_statements: tuple[str, str, str],
+    finding_evidence_ids: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
+) -> str:
+    """Return a complete response for corrective-contract regression tests."""
+    return json.dumps(
+        {
+            "research_question": {
+                "statement": (
+                    "How are social media use and sleep patterns described "
+                    "in UK adolescents?"
+                ),
+                "evidence": [{"evidence_id": "E0001"}],
+            },
+            "findings": [
+                {
+                    "statement": statement,
+                    "evidence": [
+                        {"evidence_id": evidence_id}
+                        for evidence_id in evidence_ids
+                    ],
+                    "confidence": "high",
+                }
+                for statement, evidence_ids in zip(
+                    finding_statements,
+                    finding_evidence_ids,
+                    strict=True,
+                )
+            ],
+            "limitations": [
+                {
+                    "statement": "A limitation was reported.",
+                    "evidence": [{"evidence_id": "E0003"}],
+                }
+            ],
+        }
+    )
+
+
+def _duplicate_and_unsupported_contract_response() -> str:
+    """Return a lexically anchored response with exactly two grounding issues."""
+    return _corrective_contract_response(
+        (
+            "Late sleep onset was observed in 47.3%.",
+            "Sleep duration was observed.",
+            "Waking time was observed.",
+        ),
+        (
+            ("E0001", "E0002"),
+            ("E0001", "E0002"),
+            ("E0003",),
+        ),
+    )
+
+
+def _assert_universal_corrective_contract(prompt: str) -> None:
+    """Assert the unconditional final-response contract is complete."""
+    assert prompt.count("FINAL CORRECTIVE RESPONSE CONTRACT") == 1
+    required_instructions = (
+        "Regenerate the complete JSON object from scratch",
+        "Return exactly three findings and at least one limitation",
+        "Use only exact valid evidence IDs from the supplied catalogue",
+        "Give every finding a distinct complete evidence-ID set",
+        "State one concise association per finding",
+        "Preserve association language and avoid causal claims",
+        "meaningful contiguous phrase of at least two words appearing exactly",
+        "names the claimed outcome, observation, comparison, or limitation",
+        "social media use",
+        "sleep patterns",
+        "UK adolescents",
+        "complete exact expression appears inside one individual cited evidence span",
+        "Remove numerical detail when exact support is uncertain",
+        "Prefer one strong evidence ID per finding",
+        "selected evidence directly supports the entire statement",
+        "Select the supporting evidence span first",
+        "Preserve a short exact phrase from that span",
+        "preserved phrase names the finding's actual outcome",
+        "Then return only the required JSON",
+        "Do not provide chain-of-thought",
+    )
+    for instruction in required_instructions:
+        assert instruction in prompt
+
+
+def _single_evidence_response() -> str:
+    """Return a valid internal map using three distinct finding evidence sets."""
+    return json.dumps(
+        {
+            "research_question": {
+                "statement": "What was studied?",
+                "evidence": [{"evidence_id": "E0001"}],
+            },
+            "findings": [
+                {
+                    "statement": f"Finding {label}.",
+                    "evidence": [{"evidence_id": f"E{index:04d}"}],
+                    "confidence": "high",
+                }
+                for index, label in enumerate(
+                    ("alpha", "beta", "gamma"),
+                    start=1,
+                )
+            ],
+            "limitations": [
+                {
+                    "statement": "A limitation was reported.",
+                    "evidence": [{"evidence_id": "E0001"}],
                 }
             ],
         }
@@ -127,6 +311,55 @@ def _make_service(
     provider = FakeLLMProvider(responses)
     service = ResearchMapService(provider=provider, **kwargs)
     return service, provider
+
+
+def _specificity_validation_issues(
+    evidence_texts: list[str],
+    finding_statements: list[str],
+    finding_evidence_ids: list[list[str]],
+    research_question: str = "What association was studied?",
+) -> set[str]:
+    """Validate a deterministic three-finding specificity fixture."""
+    chunks = [
+        _make_chunk(
+            f"specificity-p{index}-1",
+            page=index,
+            section="Results",
+            text=text,
+        )
+        for index, text in enumerate(evidence_texts, start=1)
+    ]
+    catalogue = _build_evidence_catalogue(chunks)
+    response = {
+        "research_question": {
+            "statement": research_question,
+            "evidence": [{"evidence_id": "E0001"}],
+        },
+        "findings": [
+            {
+                "statement": statement,
+                "evidence": [
+                    {"evidence_id": evidence_id}
+                    for evidence_id in evidence_ids
+                ],
+                "confidence": "high",
+            }
+            for statement, evidence_ids in zip(
+                finding_statements,
+                finding_evidence_ids,
+                strict=True,
+            )
+        ],
+        "limitations": [
+            {
+                "statement": "The evidence is observational.",
+                "evidence": [{"evidence_id": "E0001"}],
+            }
+        ],
+    }
+    service, _ = _make_service()
+    _, issues = service._parse_and_validate(json.dumps(response), catalogue)
+    return issues
 
 
 # ===================================================================
@@ -203,7 +436,7 @@ class TestPromptConstruction:
         provider = FakeLLMProvider([_default_valid_response()])
         service = ResearchMapService(provider=provider)
         selected = service._select_chunks(extraction)
-        prompt = service._build_prompt(selected)
+        prompt = service._build_prompt(_build_evidence_catalogue(selected))
 
         # The dangerous text should appear in the prompt as valid JSON.
         # json.dumps escapes quotes etc.
@@ -585,114 +818,41 @@ class TestParsing:
 
 class TestGrounding:
     def test_valid_evidence_succeeds(self) -> None:
-        """Evidence referencing valid selected chunks passes."""
+        """Valid evidence IDs resolve to unchanged public Evidence objects."""
         service, provider = _make_service()
         extraction = _make_extraction()
         result = service.generate_map(extraction)
         assert isinstance(result, ResearchMap)
-        # All findings have evidence.
-        for f in result.findings:
-            assert len(f.evidence) >= 1
-
-    def test_unknown_chunk_id_rejected(self) -> None:
-        """Evidence referencing non-existent chunk ID → corrective retry."""
-        invalid = json.loads(_default_valid_response())
-        invalid["findings"][0]["evidence"][0]["chunk_id"] = "nonexistent-chunk"
-        bad = json.dumps(invalid)
-        good = _default_valid_response()
-        service, provider = _make_service(responses=[bad, good])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
-        assert provider.call_count == 2
-
-    def test_page_mismatch_rejected(self) -> None:
-        """Evidence page number differs from chunk page → corrective retry."""
-        invalid = json.loads(_default_valid_response())
-        invalid["findings"][0]["evidence"][0]["page"] = 99
-        bad = json.dumps(invalid)
-        good = _default_valid_response()
-        service, provider = _make_service(responses=[bad, good])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
-        assert provider.call_count == 2
-
-    def test_excerpt_not_in_source_rejected(self) -> None:
-        """Excerpt not found in source chunk text → corrective retry."""
-        invalid = json.loads(_default_valid_response())
-        invalid["findings"][0]["evidence"][0]["excerpt"] = "This text does not appear anywhere."
-        bad = json.dumps(invalid)
-        good = _default_valid_response()
-        service, provider = _make_service(responses=[bad, good])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
-        assert provider.call_count == 2
-
-    def test_excerpt_containment_after_normalization(self) -> None:
-        """Whitespace-normalized excerpt matches normalized source."""
-        # Source: "Results content showing data."
-        # Excerpt: "Results  content   showing data." (extra spaces)
-        invalid = json.loads(_default_valid_response())
-        invalid["findings"][1]["evidence"][0]["excerpt"] = "Results  content   showing data."
-        bad = json.dumps(invalid)
-        # This should pass because normalization collapses whitespace.
-        service, provider = _make_service(responses=[bad])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
         assert provider.call_count == 1
+        assert result.findings[0].evidence[0].model_dump() == {
+            "chunk_id": "test-paper-id-p3-1",
+            "page": 3,
+            "excerpt": "Results content showing data. Finding one support.",
+        }
 
-    def test_unicode_normalized_excerpt_succeeds(self) -> None:
-        """NFKC normalization enables matching with composed/decomposed unicode."""
-        # Use an excerpt with a composed character (e.g., é = U+00E9).
-        # The source uses the same composed form.
-        source_text = "Résultats content showing data."
-        chunks = [
-            _make_chunk("test-pid-p3-1", page=3, section="Results", text=source_text),
-        ]
-        extraction = _make_extraction(chunks=chunks)
-        response = json.dumps({
-            "research_question": {
-                "statement": "Question?",
-                "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-            },
-            "findings": [
-                {
-                    "statement": "Finding one.",
-                    "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-                    "confidence": "high",
-                },
-                {
-                    "statement": "Finding two.",
-                    "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-                    "confidence": "high",
-                },
-                {
-                    "statement": "Finding three.",
-                    "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-                    "confidence": "high",
-                },
-            ],
-            "limitations": [
-                {
-                    "statement": "Limitation.",
-                    "evidence": [{"chunk_id": "test-pid-p3-1", "page": 3, "excerpt": source_text}],
-                }
-            ],
-        })
-        service, provider = _make_service(responses=[response])
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
-        assert provider.call_count == 1
+    @pytest.mark.parametrize("invalid_id", ["E9999", "e0002", " E0002 "])
+    def test_unknown_or_case_changed_evidence_id_rejected(
+        self,
+        invalid_id: str,
+    ) -> None:
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["evidence"][0]["evidence_id"] = invalid_id
+        service, provider = _make_service(
+            responses=[json.dumps(invalid), _default_valid_response()]
+        )
 
-    def test_excerpt_longer_than_300_chars_rejected(self) -> None:
-        """Excerpt exceeding 300 characters → Pydantic rejection."""
-        long_excerpt = "A" * 301
-        ev = {"chunk_id": "c1", "page": 1, "excerpt": long_excerpt}
+        assert isinstance(service.generate_map(_make_extraction()), ResearchMap)
+        assert provider.call_count == 2
+
+    def test_model_cannot_supply_public_evidence_fields(self) -> None:
+        ev = {
+            "evidence_id": "E0001",
+            "chunk_id": "controlled",
+            "page": 99,
+            "excerpt": "controlled",
+        }
         with pytest.raises(ValidationError):
-            _InternalEvidence.model_validate(ev)
+            _InternalEvidenceReference.model_validate(ev)
 
     def test_finding_without_evidence_rejected(self) -> None:
         """Finding with empty evidence → Pydantic rejection."""
@@ -740,44 +900,23 @@ class TestGrounding:
         assert isinstance(result, ResearchMap)
         assert provider.call_count == 2
 
-    def test_different_excerpts_same_chunk_accepted(self) -> None:
-        """Two different excerpts from the same chunk are not duplicates."""
-        response = json.dumps({
-            "research_question": {
-                "statement": "What?",
-                "evidence": [{"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."}],
-            },
-            "findings": [
-                {
-                    "statement": "Finding one.",
-                    "evidence": [
-                        {"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."},
-                        {"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "content showing"},
-                    ],
-                    "confidence": "high",
-                },
-                {
-                    "statement": "Finding two.",
-                    "evidence": [{"chunk_id": "test-paper-id-p3-1", "page": 3, "excerpt": "Results content showing data."}],
-                    "confidence": "partial",
-                },
-                {
-                    "statement": "Finding three.",
-                    "evidence": [{"chunk_id": "test-paper-id-p4-1", "page": 4, "excerpt": "Discussion of findings."}],
-                    "confidence": "high",
-                },
-            ],
-            "limitations": [
-                {
-                    "statement": "Lim.",
-                    "evidence": [{"chunk_id": "test-paper-id-p4-1", "page": 4, "excerpt": "Discussion of findings."}],
-                }
-            ],
-        })
-        service, provider = _make_service(responses=[response])
-        extraction = _make_extraction()
-        result = service.generate_map(extraction)
-        assert isinstance(result, ResearchMap)
+    def test_different_evidence_ids_from_same_chunk_are_not_duplicates(self) -> None:
+        text = (
+            ("Finding alpha exact sentence. " * 10)
+            + ("Finding beta exact sentence. " * 10)
+            + ("Finding gamma exact sentence. " * 10)
+        )
+        extraction = _make_extraction(
+            chunks=[_make_chunk("long", page=7, section="Results", text=text)]
+        )
+        response = json.loads(_single_evidence_response())
+        response["findings"][0]["evidence"] = [
+            {"evidence_id": "E0001"},
+            {"evidence_id": "E0002"},
+        ]
+        service, provider = _make_service(responses=[json.dumps(response)])
+
+        assert isinstance(service.generate_map(extraction), ResearchMap)
         assert provider.call_count == 1
 
     def test_exactly_three_findings_required(self) -> None:
@@ -813,6 +952,657 @@ class TestGrounding:
         assert result == "Normal text"
 
 
+class TestEvidenceCatalogue:
+    def test_short_trimmed_chunk_is_one_exact_span(self) -> None:
+        chunk = _make_chunk(
+            "chunk-a", page=2, section="Results", text="  Exact source text.  "
+        )
+
+        catalogue = _build_evidence_catalogue([chunk])
+
+        assert catalogue == [
+            _EvidenceSpan(
+                evidence_id="E0001",
+                chunk_id="chunk-a",
+                page=2,
+                section="Results",
+                text="Exact source text.",
+            )
+        ]
+        assert catalogue[0].text in chunk.text
+
+    def test_long_chunks_split_deterministically_with_stable_ids(self) -> None:
+        chunks = [
+            _make_chunk(
+                "chunk-a",
+                page=1,
+                section="Abstract",
+                text=("A sentence ends here. " * 30),
+            ),
+            _make_chunk("chunk-b", page=2, section=None, text="Final chunk."),
+        ]
+
+        first = _build_evidence_catalogue(chunks)
+        second = _build_evidence_catalogue(chunks)
+
+        assert first == second
+        assert [span.evidence_id for span in first] == [
+            f"E{index:04d}" for index in range(1, len(first) + 1)
+        ]
+        assert first[-1].chunk_id == "chunk-b"
+        for span in first:
+            source = next(c.text for c in chunks if c.chunk_id == span.chunk_id)
+            assert 0 < len(span.text) <= _MAX_EVIDENCE_SPAN_CHARS
+            assert span.text in source
+
+    def test_split_prefers_paragraph_sentence_whitespace_then_hard_limit(
+        self,
+    ) -> None:
+        paragraph_text = ("a" * 140) + "\n\n" + ("b" * 200)
+        sentence_text = ("a" * 140) + ". " + ("b" * 200)
+        whitespace_text = ("a" * 140) + " " + ("b" * 200)
+        hard_text = "x" * 620
+
+        assert _split_evidence_text(paragraph_text)[0] == "a" * 140
+        assert _split_evidence_text(sentence_text)[0] == ("a" * 140) + "."
+        assert _split_evidence_text(whitespace_text)[0] == "a" * 140
+        assert len(_split_evidence_text(hard_text)[0]) == 300
+
+    def test_spans_preserve_numerics_qualifiers_and_unicode_exactly(self) -> None:
+        text = (
+            "The effect may be −5.2–7.4 mg at 95% confidence for café "
+            "participants; it was not necessarily causal."
+        )
+        chunk = _make_chunk("numeric-unicode", page=4, text=text)
+
+        catalogue = _build_evidence_catalogue([chunk])
+
+        assert [span.text for span in catalogue] == [text]
+
+    def test_prompt_catalogue_contains_ids_and_private_contract(self) -> None:
+        service, provider = _make_service()
+
+        service.generate_map(_make_extraction())
+        prompt = provider.captured_prompts[0]
+
+        assert '"evidence_id": "E0001"' in prompt
+        assert '"evidence_id": "E0002"' in prompt
+        assert '"evidence_id": "E0003"' in prompt
+        assert "Do NOT return chunk_id, page, section, text, or excerpt" in prompt
+        assert "Keep each finding at the same level of specificity" in prompt
+        assert "Select multiple evidence IDs when one span is insufficient" in prompt
+        assert "broad association, produce only a broad association" in prompt
+        assert "Do NOT reuse the exact same complete evidence-ID set" in prompt
+
+    def test_corrective_prompt_lists_only_valid_evidence_ids(self) -> None:
+        service, provider = _make_service(
+            responses=["{invalid json}", _default_valid_response()]
+        )
+
+        service.generate_map(_make_extraction())
+        correction = provider.captured_prompts[1].split("CORRECTION REQUIRED", 1)[1]
+
+        assert '["E0001", "E0002", "E0003"]' in correction
+        assert "test-paper-id" not in correction
+        assert '"page"' not in correction
+        assert '"text"' not in correction
+
+
+class TestClaimSpecificityGuard:
+    def test_lexical_token_normalization_is_conservative(self) -> None:
+        assert _normalize_lexical_tokens("Late\u00a0Sleep—Onset") == (
+            "late",
+            "sleep",
+            "onset",
+        )
+
+    def test_exact_late_sleep_onset_anchor_passes(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The study reported late sleep onset among heavier users.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Heavier users had late sleep onset.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_returning_to_sleep_without_an_exact_anchor_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "General sleep associations were reported, including late sleep onset.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Users had difficulty returning to sleep.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_overall_sleep_quality_without_an_exact_anchor_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The study described methods and screen-time wording.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Participants had poorer overall sleep quality.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_generic_social_media_overlap_alone_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Social media use was associated with outcomes.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Social media use was examined.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+            research_question=(
+                "Does social media use affect sleep patterns?"
+            ),
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_generic_sleep_patterns_overlap_alone_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Poorer sleep patterns were observed.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Sleep patterns were recorded.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+            research_question=(
+                "Does social media use affect sleep patterns?"
+            ),
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_poorer_sleep_patterns_passes_with_a_substantive_anchor(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Heavier use was associated with poorer sleep patterns.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Heavier use was associated with poorer sleep patterns.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+            research_question=(
+                "Does social media use affect sleep patterns?"
+            ),
+        )
+
+        assert issues == set()
+
+    def test_anchor_can_come_from_one_of_several_individual_spans(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "General sleep associations were observed.",
+                "Late sleep onset was reported.",
+                "A limitation was reported.",
+            ],
+            [
+                "Late sleep onset was reported.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001", "E0002"], ["E0001", "E0003"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_anchor_split_across_spans_fails(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Late.",
+                "Onset was observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "Late onset.",
+                "Onset was observed.",
+                "A limitation was reported.",
+            ],
+            [["E0001", "E0002"], ["E0002", "E0003"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT}
+
+    def test_real_bad_output_shape_fails_both_specificity_guards(self) -> None:
+        """Detailed claims cannot all reuse one generic association span."""
+        issues = _specificity_validation_issues(
+            [
+                (
+                    "Overall, heavier social media use was associated with "
+                    "poorer sleep patterns, controlling for covariates."
+                ),
+                "A separate broad observation was reported.",
+                "An observational limitation was reported.",
+            ],
+            [
+                "Use of 5+ hours was associated with specific sleep outcomes.",
+                "Use of 3 to <5 hours affected all six sleep outcomes.",
+                "Use of <1 hour had a free-day waking exception.",
+            ],
+            [["E0001"], ["E0001"], ["E0001"]],
+        )
+
+        assert issues == {
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT,
+        }
+
+    def test_distinct_specific_evidence_sets_are_accepted(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "Use of 5+ hours was associated with shorter sleep.",
+                "The measured prevalence was 20.8%.",
+                "The confidence interval was 1.83-2.50.",
+            ],
+            [
+                "Use of 5+ hours was associated with shorter sleep.",
+                "The measured prevalence was 20.8%.",
+                "The confidence interval was 1.83-2.50.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_numeric_threshold_directly_present_is_accepted(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The 5+ hour category had poorer sleep.",
+                "A broad secondary association was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                "The 5+ hour category had poorer sleep.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_multiple_evidence_ids_can_support_multiple_details(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The high-use threshold was 5+ hours.",
+                "The measured prevalence was 20.8%. A broad secondary finding was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                "The high-use threshold was 5+ hours and the measured prevalence was 20.8%.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001", "E0002"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_critical_detail_cannot_be_synthesized_across_spans(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "The first selected span ends with 3",
+                "to <5 hours begins the second selected span.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                "Use of 3 to <5 hours was associated with poorer sleep.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001", "E0002"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT,
+        }
+
+    def test_findings_may_share_one_id_when_complete_sets_differ(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "A broad shared association was reported.",
+                "Additional support described sleep duration.",
+                "Additional support described waking time.",
+            ],
+            [
+                "A broad first association was reported.",
+                "A broad second association was reported.",
+                "A broad third association was reported.",
+            ],
+            [
+                ["E0001"],
+                ["E0001", "E0002"],
+                ["E0001", "E0003"],
+            ],
+        )
+
+        assert issues == set()
+
+    def test_repeated_unknown_ids_do_not_cascade_diagnostics(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "A broad first association was reported.",
+                "A broad second association was reported.",
+                "A broad third association was reported.",
+            ],
+            [
+                "The unsupported threshold was 5+ hours.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["UNKNOWN"], ["UNKNOWN"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNKNOWN_EVIDENCE_ID}
+
+    def test_unknown_evidence_id_does_not_cascade_to_lexical_support(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "A source phrase is present.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [
+                "An unrelated unsupported outcome was claimed.",
+                "General sleep associations were observed.",
+                "A limitation was reported.",
+            ],
+            [["UNKNOWN"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNKNOWN_EVIDENCE_ID}
+
+    def test_unknown_finding_does_not_hide_resolved_duplicate_sets(self) -> None:
+        issues = _specificity_validation_issues(
+            [
+                "A broad first association was reported.",
+                "A broad second association was reported.",
+                "A broad third association was reported.",
+            ],
+            [
+                "The unsupported threshold was 5+ hours.",
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["UNKNOWN"], ["E0002"], ["E0002"]],
+        )
+
+        assert issues == {
+            _IssueCode.UNKNOWN_EVIDENCE_ID,
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+        }
+
+    def test_broad_paraphrase_is_outside_formal_entailment_guard(self) -> None:
+        """Non-numeric paraphrasing is deliberately not proven or rejected."""
+        issues = _specificity_validation_issues(
+            [
+                "Heavier use was associated with poorer sleep.",
+                "A broad secondary association was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                "Greater use was linked to worse sleep.",
+                "A differently worded secondary finding was reported.",
+                "A differently worded tertiary finding was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == set()
+
+    def test_comparison_normalization_is_conservative(self) -> None:
+        assert _critical_details_supported(
+            "The rate was < 5% across 1.83–2.50.",
+            ["The rate was <5% across 1.83-2.50."],
+        )
+        assert _critical_details_supported(
+            "All six outcomes had a full-width rate of ２０.８％.",
+            ["All six outcomes had a full-width rate of 20.8%."],
+        )
+        assert not _critical_details_supported(
+            "The 5+ hour group differed.",
+            ["The group used social media for at least five hours."],
+        )
+        assert not _critical_details_supported(
+            "All six outcomes differed.",
+            ["All 6 outcomes differed."],
+        )
+
+    @pytest.mark.parametrize(
+        ("statement", "evidence"),
+        [
+            ("The change was 5%.", "The change was 0.5%."),
+            ("The measured value was 5.", "The measured value was 0.5."),
+            ("The measured value was 5.", "The measured value was 5.2."),
+            ("The measured value was 5.", "The measured value was 5%."),
+            ("The measured value was 5.", "The measured value was 5+."),
+            ("The measured value was 5.", "The measured value was -5."),
+            ("The measured value was 5.", "The measured value was +5."),
+            ("The measured value was 5.", "The measured value was 15."),
+            ("The measured value was 5.", "The measured value was 5,000."),
+            ("The measured value was 5.", "The measured value was 5/10."),
+            ("The measured value was 5.", "The measured value was 5:1."),
+        ],
+        ids=[
+            "percent-in-decimal",
+            "bare-in-decimal",
+            "bare-in-longer-decimal",
+            "bare-in-percent",
+            "bare-in-plus-suffix",
+            "bare-in-negative",
+            "bare-in-positive",
+            "bare-in-larger-integer",
+            "bare-in-comma-number",
+            "bare-in-ratio-slash",
+            "bare-in-ratio-colon",
+        ],
+    )
+    def test_numeric_subtokens_are_rejected(
+        self,
+        statement: str,
+        evidence: str,
+    ) -> None:
+        issues = _specificity_validation_issues(
+            [
+                evidence,
+                "A broad secondary association was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                statement,
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNSUPPORTED_CLAIM_DETAIL}
+
+    @pytest.mark.parametrize(
+        ("detail", "evidence"),
+        [
+            ("5", "The measured value was 5 hours."),
+            ("5%", "The measured value was 5% of participants."),
+            ("5+", "The measured value was 5+ hours."),
+            ("-5%", "The measured value was -5% of participants."),
+            ("<5", "The measured value was <5 hours."),
+            ("3 to <5", "The measured value was 3 to <5 hours."),
+        ],
+        ids=[
+            "bare-number",
+            "percentage",
+            "plus-suffix",
+            "signed-percentage",
+            "comparator",
+            "range",
+        ],
+    )
+    def test_complete_numeric_tokens_are_supported(
+        self,
+        detail: str,
+        evidence: str,
+    ) -> None:
+        statement = f"The measured value was {detail}."
+        assert _contains_critical_detail(
+            evidence.casefold(),
+            detail.casefold(),
+        )
+        assert _critical_details_supported(statement, [evidence])
+
+    @pytest.mark.parametrize(
+        ("statement", "expected"),
+        [
+            ("The measured total was zero.", ("zero",)),
+            ("The measured total was six.", ("six",)),
+            ("The reported count was twelve.", ("twelve",)),
+            ("The number observed was five.", ("five",)),
+            ("The sample size was twenty.", ("twenty",)),
+        ],
+    )
+    def test_standalone_number_words_in_quantitative_contexts(
+        self,
+        statement: str,
+        expected: tuple[str, ...],
+    ) -> None:
+        assert _extract_critical_details(statement) == expected
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "Section six.",
+            "Group twelve.",
+            "Model twenty.",
+            "The category was six.",
+            "Category six outcomes were described.",
+            "Version six results were reported.",
+        ],
+    )
+    def test_number_words_in_label_contexts_are_not_extracted(
+        self,
+        statement: str,
+    ) -> None:
+        assert _extract_critical_details(statement) == ()
+
+    @pytest.mark.parametrize(
+        ("statement", "evidence"),
+        [
+            (
+                "Use of 5+ hours was associated with poorer sleep.",
+                "Heavier use was associated with poorer sleep.",
+            ),
+            (
+                "Use of <1 hour was associated with poorer sleep.",
+                "Low use was associated with poorer sleep.",
+            ),
+            (
+                "All six sleep outcomes were poorer.",
+                "All sleep outcomes were poorer.",
+            ),
+            (
+                "The measured prevalence was 20.8%.",
+                "The measured prevalence was 20.7%.",
+            ),
+            (
+                "The confidence interval was 1.83-2.50.",
+                "The confidence interval was 1.83-2.40.",
+            ),
+            (
+                "Use of <5 hours was associated with poorer sleep.",
+                "Use of <=5 hours was associated with poorer sleep.",
+            ),
+            (
+                "The 95% confidence interval was 1.2-1.8.",
+                "The 95% confidence interval was 1.3-1.8.",
+            ),
+            (
+                "The change was 5%.",
+                "The change was -5%.",
+            ),
+            (
+                "The change was +5%.",
+                "The change was -5%.",
+            ),
+        ],
+        ids=[
+            "unsupported-plus-threshold",
+            "unsupported-less-than-threshold",
+            "unsupported-all-six",
+            "changed-percentage",
+            "changed-range",
+            "changed-comparator",
+            "unsupported-confidence-interval",
+            "removed-sign",
+            "changed-sign",
+        ],
+    )
+    def test_unsupported_critical_details_are_rejected(
+        self,
+        statement: str,
+        evidence: str,
+    ) -> None:
+        issues = _specificity_validation_issues(
+            [
+                evidence,
+                "A broad secondary association was reported.",
+                "A broad tertiary association was reported.",
+            ],
+            [
+                statement,
+                "A broad secondary finding was reported.",
+                "A broad tertiary finding was reported.",
+            ],
+            [["E0001"], ["E0002"], ["E0003"]],
+        )
+
+        assert issues == {_IssueCode.UNSUPPORTED_CLAIM_DETAIL}
+
+    def test_critical_detail_extraction_is_surface_based(self) -> None:
+        assert _extract_critical_details(
+            "The 5+ and <1 groups ranged from 3 to <5 hours; "
+            "20.8% had a 1.83–2.50 interval across all six outcomes."
+        ) == ("5+", "<1", "3 to <5", "20.8%", "1.83-2.50", "all six")
+
+
 # ===================================================================
 # Retry
 # ===================================================================
@@ -827,6 +1617,9 @@ class TestRetry:
         extraction = _make_extraction()
         service.generate_map(extraction)
         assert provider.call_count == 2
+        initial_prompt, corrective_prompt = provider.captured_prompts
+        assert "FINAL CORRECTIVE RESPONSE CONTRACT" not in initial_prompt
+        _assert_universal_corrective_contract(corrective_prompt)
 
     def test_valid_corrective_response_succeeds(self) -> None:
         """Corrective retry returns valid response → success."""
@@ -836,6 +1629,294 @@ class TestRetry:
         extraction = _make_extraction()
         result = service.generate_map(extraction)
         assert isinstance(result, ResearchMap)
+        assert provider.call_count == 2
+
+    def test_unsupported_detail_activates_conservative_retry_safely(self) -> None:
+        unsupported_detail = "47.3%"
+        invalid = _unsupported_detail_response(unsupported_detail)
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        result = service.generate_map(_make_extraction())
+
+        assert provider.call_count == 2
+        initial_prompt, corrective_prompt = provider.captured_prompts
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" not in initial_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
+        assert "UNSUPPORTED_CLAIM_DETAIL" in corrective_prompt
+        _assert_universal_corrective_contract(corrective_prompt)
+        assert invalid not in corrective_prompt
+        assert unsupported_detail not in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert "State one concise qualitative association per finding" in corrective_prompt
+        assert "prefer removing quantitative detail" in corrective_prompt
+
+        # The successful fallback still converts through the unchanged public model.
+        assert isinstance(result, ResearchMap)
+        assert result.paper_id == "test-paper-id"
+        assert [finding.statement for finding in result.findings] == [
+            "Finding one.",
+            "Finding two.",
+            "Finding three.",
+        ]
+        assert result.findings[0].evidence[0].chunk_id == "test-paper-id-p3-1"
+        assert result.findings[0].evidence[0].page == 3
+        assert result.findings[0].evidence[0].excerpt == (
+            "Results content showing data. Finding one support."
+        )
+
+    def test_lexical_support_activates_issue_specific_retry_safely(self) -> None:
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["statement"] = "Unrelated outcome phrase."
+        invalid_json = json.dumps(invalid)
+        service, provider = _make_service(
+            responses=[invalid_json, _default_valid_response()]
+        )
+
+        result = service.generate_map(_make_extraction())
+
+        assert isinstance(result, ResearchMap)
+        assert provider.call_count == 2
+        corrective_prompt = provider.captured_prompts[1]
+        assert "INSUFFICIENT_LEXICAL_SUPPORT" in corrective_prompt
+        assert "BOUNDED LEXICAL-SUPPORT RETRY GUIDANCE" in corrective_prompt
+        assert "meaningful phrase of at least two consecutive tokens" in corrective_prompt
+        assert "terminology appearing directly in the cited evidence" in corrective_prompt
+        assert "Select a different evidence span" in corrective_prompt
+        assert "generic subject overlap alone" in corrective_prompt
+        assert invalid_json not in corrective_prompt
+
+    def test_lexical_and_quantitative_retry_guidance_composes(self) -> None:
+        invalid = _unsupported_detail_response("47.3%")
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        result = service.generate_map(_make_extraction())
+
+        assert isinstance(result, ResearchMap)
+        assert provider.call_count == 2
+        corrective_prompt = provider.captured_prompts[1]
+        assert "UNSUPPORTED_CLAIM_DETAIL" in corrective_prompt
+        assert "INSUFFICIENT_LEXICAL_SUPPORT" in corrective_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
+        assert "BOUNDED LEXICAL-SUPPORT RETRY GUIDANCE" in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert invalid not in corrective_prompt
+
+    def test_corrected_generic_overlap_still_fails(self) -> None:
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["statement"] = "Social media use."
+        # The research question already contains this generic subject phrase.
+        invalid["research_question"]["statement"] = (
+            "Does social media use affect sleep patterns?"
+        )
+        invalid_json = json.dumps(invalid)
+        extraction = _make_extraction(
+            chunks=[
+                _make_chunk(
+                    "test-paper-id-p1-1",
+                    page=1,
+                    section="Abstract",
+                    text="Abstract content. Finding two support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p3-1",
+                    page=3,
+                    section="Results",
+                    text="Social media use was associated with outcomes. Finding one support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p4-1",
+                    page=4,
+                    section="Discussion",
+                    text="Discussion of findings. Finding three support. A limitation support.",
+                ),
+            ]
+        )
+        service, provider = _make_service(
+            responses=[invalid_json, invalid_json]
+        )
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(extraction)
+
+        assert excinfo.value.issue_codes == {
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT
+        }
+        assert provider.call_count == 2
+
+    def test_repeated_unsupported_detail_after_retry_still_fails(self) -> None:
+        service, provider = _make_service(
+            responses=[
+                _unsupported_detail_response("47.3%"),
+                _unsupported_detail_response("88.8%"),
+            ]
+        )
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(_make_extraction())
+
+        assert excinfo.value.issue_codes == {
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT,
+        }
+        assert provider.call_count == 2
+
+    def test_invalid_schema_does_not_activate_conservative_retry(self) -> None:
+        invalid = json.dumps({"findings": [], "limitations": []})
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        service.generate_map(_make_extraction())
+
+        corrective_prompt = provider.captured_prompts[1]
+        issue_section = corrective_prompt.split(
+            "The previous response contained the following issues:\n", 1
+        )[1].split("\n\nValid evidence IDs:", 1)[0]
+        assert issue_section == _IssueCode.INVALID_SCHEMA
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" not in corrective_prompt
+        _assert_universal_corrective_contract(corrective_prompt)
+        assert invalid not in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+
+    def test_unknown_evidence_id_only_retains_universal_contract(self) -> None:
+        failed_statement = "SENTINEL_FAILED_FINDING_STATEMENT"
+        invalid_map = json.loads(_default_valid_response())
+        invalid_map["findings"][0]["statement"] = failed_statement
+        invalid_map["findings"][0]["evidence"] = [
+            {"evidence_id": "UNKNOWN"}
+        ]
+        invalid = json.dumps(invalid_map)
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        assert isinstance(service.generate_map(_make_extraction()), ResearchMap)
+
+        corrective_prompt = provider.captured_prompts[1]
+        issue_section = corrective_prompt.split(
+            "The previous response contained the following issues:\n", 1
+        )[1].split("\n\nValid evidence IDs:", 1)[0]
+        assert issue_section == _IssueCode.UNKNOWN_EVIDENCE_ID
+        _assert_universal_corrective_contract(corrective_prompt)
+        assert "EXACT EVIDENCE-ID RETRY GUIDANCE" in corrective_prompt
+        assert invalid not in corrective_prompt
+        assert failed_statement not in corrective_prompt
+        assert '"UNKNOWN"' not in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert provider.call_count == 2
+
+    def test_duplicate_and_detail_correction_succeeds_with_exact_anchors(
+        self,
+    ) -> None:
+        invalid = _duplicate_and_unsupported_contract_response()
+        corrected = _corrective_contract_response(
+            (
+                "Late sleep onset was observed.",
+                "Sleep duration was observed.",
+                "Waking time was observed.",
+            ),
+            (("E0001",), ("E0002",), ("E0003",)),
+        )
+        service, provider = _make_service(responses=[invalid, corrected])
+
+        result = service.generate_map(_make_corrective_contract_extraction())
+
+        assert isinstance(result, ResearchMap)
+        assert provider.call_count == 2
+        corrective_prompt = provider.captured_prompts[1]
+        issue_section = corrective_prompt.split(
+            "The previous response contained the following issues:\n", 1
+        )[1].split("\n\nValid evidence IDs:", 1)[0]
+        assert set(issue_section.split(", ")) == {
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+        }
+        assert _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT not in issue_section
+        _assert_universal_corrective_contract(corrective_prompt)
+        assert "DISTINCT FINDING EVIDENCE-SET RETRY GUIDANCE" in corrective_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
+        assert "BOUNDED LEXICAL-SUPPORT RETRY GUIDANCE" not in corrective_prompt
+        assert invalid not in corrective_prompt
+        assert "Late sleep onset was observed in 47.3%." not in corrective_prompt
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert [finding.statement for finding in result.findings] == [
+            "Late sleep onset was observed.",
+            "Sleep duration was observed.",
+            "Waking time was observed.",
+        ]
+        assert result.findings[0].evidence[0].model_dump() == {
+            "chunk_id": "corrective-p1-1",
+            "page": 1,
+            "excerpt": (
+                "Social media use was recorded. "
+                "Late sleep onset was observed."
+            ),
+        }
+
+    def test_duplicate_and_detail_correction_with_generic_overlap_fails(
+        self,
+    ) -> None:
+        invalid = _duplicate_and_unsupported_contract_response()
+        generic_correction = _corrective_contract_response(
+            ("Social media use.", "Sleep patterns.", "UK adolescents."),
+            (("E0001",), ("E0002",), ("E0003",)),
+        )
+        service, provider = _make_service(
+            responses=[invalid, generic_correction]
+        )
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(_make_corrective_contract_extraction())
+
+        assert excinfo.value.issue_codes == {
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT
+        }
+        assert provider.call_count == 2
+        corrective_prompt = provider.captured_prompts[1]
+        issue_section = corrective_prompt.split(
+            "The previous response contained the following issues:\n", 1
+        )[1].split("\n\nValid evidence IDs:", 1)[0]
+        assert set(issue_section.split(", ")) == {
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+        }
+        _assert_universal_corrective_contract(corrective_prompt)
+
+    def test_combined_issue_guidance_is_composed_without_response_leakage(
+        self,
+    ) -> None:
+        unsupported_detail = "47.3%"
+        invalid_map = json.loads(_unsupported_detail_response(unsupported_detail))
+        invalid_map["findings"][1]["evidence"] = [
+            {"evidence_id": "E0002"}
+        ]
+        invalid_map["findings"][2]["evidence"] = [
+            {"evidence_id": "UNKNOWN"}
+        ]
+        invalid = json.dumps(invalid_map)
+        service, provider = _make_service(
+            responses=[invalid, _default_valid_response()]
+        )
+
+        service.generate_map(_make_extraction())
+
+        corrective_prompt = provider.captured_prompts[1]
+        assert "UNSUPPORTED_CLAIM_DETAIL" in corrective_prompt
+        assert "DUPLICATE_FINDING_EVIDENCE" in corrective_prompt
+        assert "UNKNOWN_EVIDENCE_ID" in corrective_prompt
+        assert "CONSERVATIVE SPECIFICITY RETRY MODE" in corrective_prompt
+        assert "DISTINCT FINDING EVIDENCE-SET RETRY GUIDANCE" in corrective_prompt
+        assert "EXACT EVIDENCE-ID RETRY GUIDANCE" in corrective_prompt
+        assert "Use a different complete evidence-ID set for every finding" in corrective_prompt
+        _assert_universal_corrective_contract(corrective_prompt)
+        assert 'Valid evidence IDs:\n["E0001", "E0002", "E0003"]' in corrective_prompt
+        assert invalid not in corrective_prompt
+        assert invalid_map["findings"][0]["statement"] not in corrective_prompt
+        assert unsupported_detail not in corrective_prompt
         assert provider.call_count == 2
 
     def test_only_two_model_calls_max(self) -> None:
@@ -976,11 +2057,21 @@ class TestIssueCodes:
         assert _IssueCode.INVALID_JSON == "INVALID_JSON"
         assert _IssueCode.INVALID_SCHEMA == "INVALID_SCHEMA"
         assert _IssueCode.WRONG_FINDING_COUNT == "WRONG_FINDING_COUNT"
-        assert _IssueCode.UNKNOWN_CHUNK_ID == "UNKNOWN_CHUNK_ID"
-        assert _IssueCode.PAGE_MISMATCH == "PAGE_MISMATCH"
-        assert _IssueCode.EXCERPT_NOT_FOUND == "EXCERPT_NOT_FOUND"
+        assert _IssueCode.UNKNOWN_EVIDENCE_ID == "UNKNOWN_EVIDENCE_ID"
         assert _IssueCode.DUPLICATE_FINDING == "DUPLICATE_FINDING"
         assert _IssueCode.DUPLICATE_EVIDENCE == "DUPLICATE_EVIDENCE"
+        assert (
+            _IssueCode.DUPLICATE_FINDING_EVIDENCE
+            == "DUPLICATE_FINDING_EVIDENCE"
+        )
+        assert (
+            _IssueCode.UNSUPPORTED_CLAIM_DETAIL
+            == "UNSUPPORTED_CLAIM_DETAIL"
+        )
+        assert (
+            _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT
+            == "INSUFFICIENT_LEXICAL_SUPPORT"
+        )
         assert _IssueCode.MISSING_LIMITATION == "MISSING_LIMITATION"
         assert _IssueCode.UNCERTAIN_CONFIDENCE == "UNCERTAIN_CONFIDENCE"
 
@@ -999,6 +2090,221 @@ class TestIssueCodes:
             # Ensure no exception references in the corrective prompt.
             assert "traceback" not in corrective.lower()
             assert "Exception" not in corrective
+
+    def test_first_attempt_logs_only_sorted_safe_issue_codes(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The initial validation log excludes prompt, output, and chunk text."""
+        prompt_sentinel = "SENTINEL_PROMPT_TEXT"
+        output_sentinel = "SENTINEL_MODEL_OUTPUT"
+        chunk_sentinel = "SENTINEL_PAPER_CHUNK_TEXT"
+        extraction = _make_extraction(
+            chunks=[
+                _make_chunk(
+                    "test-paper-id-p1-1",
+                    page=1,
+                    section="Abstract",
+                    text=f"Abstract content. {chunk_sentinel} Finding two support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p3-1",
+                    page=3,
+                    section="Results",
+                    text="Results content showing data. Finding one support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p4-1",
+                    page=4,
+                    section="Discussion",
+                    text="Discussion of findings. Finding three support.",
+                ),
+            ]
+        )
+        service, _ = _make_service(
+            responses=[output_sentinel, _default_valid_response()],
+            prompt_template=f"{prompt_sentinel} {_CONTEXT_SENTINEL}",
+        )
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        result = service.generate_map(extraction)
+
+        assert isinstance(result, ResearchMap)
+        validation_logs = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Research map validation failed:")
+        ]
+        assert validation_logs == [
+            "Research map validation failed: attempt=1 "
+            "issue_codes=['INVALID_JSON']"
+        ]
+        complete_log = caplog.text
+        assert prompt_sentinel not in complete_log
+        assert output_sentinel not in complete_log
+        assert chunk_sentinel not in complete_log
+
+    def test_lexical_support_log_exposes_no_phrase_or_source_text(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        missing_phrase = "SENTINEL_MISSING_LEXICAL_PHRASE"
+        source_sentinel = "SENTINEL_LEXICAL_SOURCE_TEXT"
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["statement"] = missing_phrase
+        extraction = _make_extraction(
+            chunks=[
+                _make_chunk(
+                    "test-paper-id-p1-1",
+                    page=1,
+                    section="Abstract",
+                    text="Abstract content. Finding two support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p3-1",
+                    page=3,
+                    section="Results",
+                    text=f"Evidence anchor. {source_sentinel} Finding one support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p4-1",
+                    page=4,
+                    section="Discussion",
+                    text="Discussion of findings. Finding three support. A limitation support.",
+                ),
+            ]
+        )
+        service, _ = _make_service(
+            responses=[json.dumps(invalid), _default_valid_response()]
+        )
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        assert isinstance(service.generate_map(extraction), ResearchMap)
+        assert (
+            "Research map validation failed: attempt=1 "
+            "issue_codes=['INSUFFICIENT_LEXICAL_SUPPORT']"
+            in caplog.messages
+        )
+        assert missing_phrase not in caplog.text
+        assert source_sentinel not in caplog.text
+
+    def test_unsupported_detail_log_does_not_include_expression_or_source(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        unsupported_expression = "5+"
+        source_sentinel = "SENTINEL_SPECIFICITY_SOURCE"
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["statement"] = (
+            f"The unsupported threshold was {unsupported_expression}."
+        )
+        extraction = _make_extraction(
+            chunks=[
+                _make_chunk(
+                    "test-paper-id-p1-1",
+                    page=1,
+                    section="Abstract",
+                    text=f"Abstract content. {source_sentinel} Finding two support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p3-1",
+                    page=3,
+                    section="Results",
+                    text="Results content showing data. Finding one support.",
+                ),
+                _make_chunk(
+                    "test-paper-id-p4-1",
+                    page=4,
+                    section="Discussion",
+                    text="Discussion of findings. Finding three support.",
+                ),
+            ]
+        )
+        service, _ = _make_service(
+            responses=[json.dumps(invalid), _default_valid_response()]
+        )
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        assert isinstance(service.generate_map(extraction), ResearchMap)
+        assert (
+            "Research map validation failed: attempt=1 "
+            "issue_codes=['INSUFFICIENT_LEXICAL_SUPPORT', "
+            "'UNSUPPORTED_CLAIM_DETAIL']"
+            in caplog.messages
+        )
+        assert unsupported_expression not in caplog.text
+        assert source_sentinel not in caplog.text
+
+    def test_corrective_returned_issue_codes_are_preserved(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Grounding issues returned on attempt two survive on the final error."""
+        invalid = json.loads(_default_valid_response())
+        invalid["findings"][0]["evidence"][0]["evidence_id"] = (
+            "SENTINEL_MODEL_OUTPUT_ID"
+        )
+        invalid["findings"][1]["statement"] = "Finding one."
+        service, provider = _make_service(
+            responses=["{invalid json}", json.dumps(invalid)]
+        )
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(_make_extraction())
+
+        assert provider.call_count == 2
+        assert excinfo.value.issue_codes == frozenset(
+            {_IssueCode.DUPLICATE_FINDING, _IssueCode.UNKNOWN_EVIDENCE_ID}
+        )
+        assert (
+            "Research map validation failed: attempt=2 "
+            "issue_codes=['DUPLICATE_FINDING', 'UNKNOWN_EVIDENCE_ID']"
+            in caplog.messages
+        )
+        assert "SENTINEL_MODEL_OUTPUT_ID" not in caplog.text
+
+    def test_corrective_raised_issue_codes_and_chain_are_handled(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Attempt-two exceptions retain codes without logging their chain."""
+        service, provider = _make_service(responses=["{invalid json}", "{}"])
+        original_parse = service._parse_and_validate
+        parse_calls = 0
+
+        def _parse_with_chained_failure(
+            raw: str,
+            evidence_catalogue: list[_EvidenceSpan],
+        ) -> tuple[_InternalResearchMap, set[str]]:
+            nonlocal parse_calls
+            parse_calls += 1
+            if parse_calls == 2:
+                try:
+                    raise ValueError("SENTINEL_CHAINED_EXCEPTION")
+                except ValueError as cause:
+                    raise MapGenerationError(
+                        "SENTINEL_OUTER_EXCEPTION",
+                        issue_codes={_IssueCode.INVALID_SCHEMA},
+                    ) from cause
+            return original_parse(raw, evidence_catalogue)
+
+        monkeypatch.setattr(service, "_parse_and_validate", _parse_with_chained_failure)
+        caplog.set_level(logging.WARNING, logger="app.services.research_map")
+
+        with pytest.raises(MapGenerationError) as excinfo:
+            service.generate_map(_make_extraction())
+
+        assert provider.call_count == 2
+        assert excinfo.value.issue_codes == frozenset({_IssueCode.INVALID_SCHEMA})
+        assert (
+            "Research map validation failed: attempt=2 "
+            "issue_codes=['INVALID_SCHEMA']"
+            in caplog.messages
+        )
+        assert "SENTINEL_CHAINED_EXCEPTION" not in caplog.text
+        assert "SENTINEL_OUTER_EXCEPTION" not in caplog.text
 
 
 # ===================================================================

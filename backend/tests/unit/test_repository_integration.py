@@ -14,10 +14,14 @@ from app.database import init_db
 from app.models.job import JobStatus
 from app.models.paper import Chunk, ExtractionResult
 from app.models.research_map import Evidence, Finding, ResearchMap
-from app.repositories.errors import InvalidJobTransitionError, PersistenceError
+from app.repositories.errors import (
+    CorruptRecordError,
+    InvalidJobTransitionError,
+    PersistenceError,
+)
 from app.repositories.extraction_store import ExtractionStore
 from app.repositories.job_store import JobStore
-from app.repositories.research_map_store import ResearchMapStore
+from app.repositories.research_map_store import GenerationMode, ResearchMapStore
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -350,3 +354,267 @@ def test_shared_connection_remains_open(
     assert retrieved.status == JobStatus.SUCCEEDED
 
     conn.close()
+
+
+def test_metadata_table_is_created(db_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'research_map_metadata'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert "generation_mode" in row[0]
+    assert "fallback_reason" in row[0]
+    assert "ON DELETE CASCADE" in row[0]
+
+
+@pytest.mark.parametrize(
+    ("mode", "reason"),
+    [
+        (GenerationMode.GRANITE, "llm_provider_error"),
+        (GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK, None),
+        (GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK, "other"),
+        ("granite", None),
+    ],
+)
+def test_invalid_generation_metadata_is_rejected_before_persistence(
+    research_map_store: ResearchMapStore,
+    sample_research_map: ResearchMap,
+    mode: object,
+    reason: str | None,
+) -> None:
+    with pytest.raises(ValueError):
+        research_map_store.save(
+            sample_research_map,
+            generation_mode=mode,  # type: ignore[arg-type]
+            fallback_reason=reason,
+        )
+
+    assert research_map_store.get(sample_research_map.paper_id) is None
+
+
+def test_granite_and_fallback_metadata_round_trip_and_replace(
+    db_path: str,
+    sample_research_map: ResearchMap,
+) -> None:
+    store = ResearchMapStore(db_path)
+    store.save(sample_research_map)
+    granite = store.get_generation_metadata(sample_research_map.paper_id)
+
+    assert granite is not None
+    assert granite.generation_mode is GenerationMode.GRANITE
+    assert granite.fallback_reason is None
+    assert granite.generated_at is not None
+
+    replacement = sample_research_map.model_copy(
+        update={"research_question": "Replacement question?"}
+    )
+    store.save(
+        replacement,
+        generation_mode=GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK,
+        fallback_reason="llm_provider_error",
+    )
+    reopened = ResearchMapStore(db_path)
+    persisted = reopened.require(sample_research_map.paper_id)
+    fallback = reopened.get_generation_metadata(sample_research_map.paper_id)
+
+    assert persisted.research_question == "Replacement question?"
+    assert fallback is not None
+    assert (
+        fallback.generation_mode
+        is GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK
+    )
+    assert fallback.fallback_reason == "llm_provider_error"
+    assert fallback.generated_at is not None
+
+
+def test_legacy_map_without_metadata_is_treated_as_granite(
+    db_path: str,
+    sample_research_map: ResearchMap,
+) -> None:
+    store = ResearchMapStore(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO research_maps (paper_id, map_json) VALUES (?, ?)",
+            (
+                sample_research_map.paper_id,
+                sample_research_map.model_dump_json(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    metadata = store.get_generation_metadata(sample_research_map.paper_id)
+
+    assert metadata is not None
+    assert metadata.generation_mode is GenerationMode.GRANITE
+    assert metadata.fallback_reason is None
+    assert metadata.generated_at is None
+    assert store.get_generation_metadata("missing-paper") is None
+
+
+def test_malformed_metadata_raises_corrupt_record(
+    db_path: str,
+    sample_research_map: ResearchMap,
+) -> None:
+    store = ResearchMapStore(db_path)
+    store.save(sample_research_map)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE research_map_metadata SET generated_at = 'not-a-timestamp' "
+            "WHERE paper_id = ?",
+            (sample_research_map.paper_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(CorruptRecordError):
+        store.get_generation_metadata(sample_research_map.paper_id)
+
+
+def test_metadata_failure_rolls_back_map_and_metadata_together(
+    db_path: str,
+    sample_research_map: ResearchMap,
+) -> None:
+    store = ResearchMapStore(db_path)
+    store.save(sample_research_map)
+    original_metadata = store.get_generation_metadata(sample_research_map.paper_id)
+    replacement = sample_research_map.model_copy(
+        update={"research_question": "Must be rolled back?"}
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TRIGGER fail_metadata_update
+            BEFORE UPDATE ON research_map_metadata
+            BEGIN
+                SELECT RAISE(ABORT, 'forced metadata failure');
+            END
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(PersistenceError):
+        store.save(
+            replacement,
+            generation_mode=GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK,
+            fallback_reason="llm_provider_error",
+        )
+
+    assert store.require(sample_research_map.paper_id) == sample_research_map
+    assert store.get_generation_metadata(sample_research_map.paper_id) == original_metadata
+
+
+def test_caller_owned_map_save_releases_savepoint_but_keeps_outer_transaction(
+    db_path: str,
+    sample_research_map: ResearchMap,
+) -> None:
+    store = ResearchMapStore(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("BEGIN")
+    try:
+        store.save(sample_research_map, conn=conn)
+
+        assert conn.in_transaction
+        assert store.require(sample_research_map.paper_id, conn=conn) == sample_research_map
+        metadata = store.get_generation_metadata(
+            sample_research_map.paper_id,
+            conn=conn,
+        )
+        assert metadata is not None
+        assert metadata.generation_mode is GenerationMode.GRANITE
+
+        fresh = sqlite3.connect(db_path)
+        try:
+            assert fresh.execute(
+                "SELECT 1 FROM research_maps WHERE paper_id = ?",
+                (sample_research_map.paper_id,),
+            ).fetchone() is None
+        finally:
+            fresh.close()
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_caller_owned_metadata_failure_rolls_back_only_repository_savepoint(
+    db_path: str,
+    sample_research_map: ResearchMap,
+) -> None:
+    store = ResearchMapStore(db_path)
+    job_store = JobStore(db_path)
+    store.save(sample_research_map)
+    original_metadata = store.get_generation_metadata(sample_research_map.paper_id)
+    replacement = sample_research_map.model_copy(
+        update={"research_question": "Partial replacement must not persist?"}
+    )
+
+    trigger_conn = sqlite3.connect(db_path)
+    try:
+        trigger_conn.execute(
+            """
+            CREATE TRIGGER fail_caller_metadata_update
+            BEFORE UPDATE ON research_map_metadata
+            BEGIN
+                SELECT RAISE(ABORT, 'forced caller metadata failure');
+            END
+            """
+        )
+        trigger_conn.commit()
+    finally:
+        trigger_conn.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("BEGIN")
+    try:
+        before_job = job_store.create("unrelated-before-savepoint", conn=conn)
+
+        with pytest.raises(PersistenceError):
+            store.save(
+                replacement,
+                generation_mode=GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK,
+                fallback_reason="llm_provider_error",
+                conn=conn,
+            )
+
+        assert conn.in_transaction
+        assert store.require(sample_research_map.paper_id, conn=conn) == sample_research_map
+        assert (
+            store.get_generation_metadata(sample_research_map.paper_id, conn=conn)
+            == original_metadata
+        )
+        assert job_store.require(before_job.job_id, conn=conn) == before_job
+
+        after_job = job_store.create("unrelated-after-savepoint", conn=conn)
+        assert job_store.require(after_job.job_id, conn=conn) == after_job
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    reopened = ResearchMapStore(db_path)
+    assert reopened.require(sample_research_map.paper_id) == sample_research_map
+    assert (
+        reopened.get_generation_metadata(sample_research_map.paper_id)
+        == original_metadata
+    )
+    assert JobStore(db_path).require(before_job.job_id) == before_job
+    assert JobStore(db_path).require(after_job.job_id) == after_job

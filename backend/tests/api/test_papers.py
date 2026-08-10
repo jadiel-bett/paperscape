@@ -530,6 +530,15 @@ class TestGetResearchMap:
         resp = client.get("/api/v1/papers/p-map-ret/research-map")
         assert resp.status_code == 200
         data = resp.json()
+        assert set(data) == {
+            "paper_id",
+            "research_question",
+            "findings",
+            "limitations",
+            "disclaimer",
+        }
+        assert "generation_mode" not in data
+        assert "fallback_reason" not in data
         assert data["research_question"] == "Q?"
         assert len(data["findings"]) == 3
 

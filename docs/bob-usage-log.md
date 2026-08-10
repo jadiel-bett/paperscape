@@ -803,7 +803,9 @@ from ibm_watsonx_ai.metanames import GenTextParamsMetaNames
   * `validate`
   * `max_retries`
 * `validate=False` prevents a model-list request during client construction
-* `max_retries=0` disables SDK-owned retry behavior
+* The initial review concluded that `max_retries=0` disabled SDK-owned retry
+  behavior; Sub-task 11 later corrected this because the pinned
+  `RetryTransport` remains active
 * `generate_text()` can declare return values other than `str`, so runtime response validation is required
 * Structured SDK request failures can expose an HTTP status through `exc.response.status_code`
 * Credential errors do not always expose a response object
@@ -818,8 +820,9 @@ The developer reviewed the Bob-generated plan and required:
 * Model response errors to use a separate `LLMResponseError`
 * Greedy decoding when `temperature == 0`
 * Sample decoding when `temperature > 0`
-* The IBM SDK retry system to be disabled
-* PaperScape to own a maximum of one retry
+* The IBM SDK response-decorator retry system to be disabled
+* PaperScape to own a maximum of one provider-level retry, while the pinned
+  transport layer remained separately active as later documented
 * Retry behavior based on an explicit status-code allowlist
 * Unknown HTTP status codes to default to non-transient
 * No exception classification based on parsing arbitrary error strings
@@ -950,9 +953,9 @@ Response-validation failures are never retried.
 
 ### Retry behavior
 
-PaperScape owns the retry loop.
+PaperScape owns its provider-level retry loop.
 
-The IBM SDK retry system is disabled with:
+The IBM SDK response-decorator retry layer is disabled with:
 
 ```text
 max_retries=0
@@ -1074,7 +1077,8 @@ Bob corrected the implementation so that:
 * `418` is not retried
 * `521` is not retried
 * Known transient failures retry once
-* At most two SDK calls are possible
+* At most two provider SDK method calls are possible; each can contain pinned
+  SDK transport retries
 * Reported test totals come directly from pytest collection
 
 ### 4. Tests and validation
@@ -1171,7 +1175,8 @@ The developer:
 * Required IBM Granite and watsonx.ai integration
 * Required actual SDK introspection before implementation
 * Selected `generate_text()`
-* Required one retry owner
+* Required one provider-level retry owner; later pinned-source inspection
+  distinguished the SDK transport retry layer
 * Defined explicit transient statuses
 * Required unknown statuses to fail without retry
 * Required credential and prompt safety
@@ -4156,3 +4161,436 @@ Sub-task 10 produced a reproducible two-container local environment and a determ
 Successful map generation remains available as an optional manual test when valid backend-only watsonx credentials are supplied.
 
 The default automated and credential-free workflows remain network-independent and safe.
+
+---
+
+## Sub-task 11A — Watsonx Chat API migration
+
+### Recorded Tier A result
+
+The first gated Tier A connectivity test used the explicit
+`ibm/granite-4-h-small` candidate in Frankfurt through the pinned SDK's
+deprecated `ModelInference.generate_text` path.
+
+IAM authentication, `WatsonxProvider` construction, and `ModelInference`
+construction succeeded. The inference request did not raise an HTTP access
+error. The SDK warned that `decoding_method` was ignored and that the
+text-generation endpoint is deprecated. It returned an empty string, so
+PaperScape raised `LLMResponseError` and Tier A failed safely.
+
+The one-invocation cost approval recorded by Jadiel Bett on 30 July 2026 was
+consumed by that test. It does not authorize another paid call. No credentials,
+project ID, IAM token, prompt, generated content, or raw SDK response was
+recorded.
+
+### Migration decision
+
+The developer approved a bounded migration that preserves:
+
+- `LLMProvider.generate(prompt, max_tokens, temperature) -> str`;
+- the existing ResearchMap prompt and generation limits;
+- the provider-owned transient retry;
+- ResearchMap's separate corrective call;
+- the application model default until migrated Tier A succeeds.
+
+`WatsonxProvider` now internally calls `ModelInference.chat` with the exact
+existing prompt as one user message. It maps `max_tokens` to
+`max_completion_tokens`, passes temperature exactly, and strictly validates the
+assistant role, refusal state, string content, non-empty content, and successful
+`stop` finish state. Raw Chat response values are never placed in provider
+errors or logs.
+
+JSON response format was not forced globally because the generic provider also
+serves non-JSON prompts. The existing ResearchMap prompt and Pydantic validation
+continue to enforce structured output.
+
+### TLS and retry correction
+
+Pinned `ibm-watsonx-ai==1.5.14` source inspection confirmed that
+`max_retries=0` disables only the `_with_retry` response-decorator layer. The
+separate `RetryTransport` remains configured for three retries, allowing up to
+four transport-loop iterations per Chat invocation.
+
+The provider now explicitly constructs credentials with `verify=True`. This
+preserves certificate validation and disables the pinned SDK's unverified SSL
+fallback. No SDK files were patched and no certificate error was suppressed.
+
+The revised theoretical raw inference bounds are:
+
+- four per Chat invocation;
+- eight for Tier A, including one provider transient retry;
+- sixteen for Tier B, including one ResearchMap corrective call.
+
+Authentication and provider-construction requests remain additional. These
+figures are theoretical bounds, not measured counts, approved paid ceilings, or
+necessarily billable requests. Unobservable attempts remain unknown rather than
+being reported as zero.
+
+### Authorization boundary
+
+Sub-task 11A implementation and offline verification do not authorize a paid
+Tier A rerun. A migrated Tier A call remains blocked until:
+
+- the implementation is independently audited;
+- all offline gates pass;
+- Lite-plan quota and Frankfurt availability are reconfirmed;
+- a new explicit decision accepts the Chat path's eight-request theoretical
+  inference bound plus additional authentication/construction traffic.
+
+Tier B, the live evaluator, and promotion of `ibm/granite-4-h-small` as the
+application default remain separately blocked.
+
+### Offline verification
+
+The completed migration passed:
+
+- 94 provider unit tests;
+- 67 ResearchMap unit tests;
+- 2 integration pipeline tests;
+- 454-test backend collection;
+- 453 backend tests with only the unauthorized Tier A test skipped;
+- the offline ResearchMap evaluation;
+- `pip check`;
+- frontend formatting with zero changes;
+- Flutter analysis with no issues;
+- 42 Flutter tests;
+- the Flutter Web release build.
+
+Both live gates remained absent. No live watsonx call occurred, no real provider
+was constructed, and no ignored credential file was inspected.
+
+#### Migrated Chat Tier A result
+
+After the provider migration from the deprecated text-generation endpoint to
+the watsonx Chat API, the gated Tier A connectivity test was run once against
+the Frankfurt project using `ibm/granite-4-h-small`.
+
+Result:
+
+- `1 passed`
+- execution time: `13.48s`
+- warnings: none
+- no automatic rerun
+- no credentials, project identifiers, prompts, or generated content recorded
+
+This proved live compatibility of the pinned SDK, Frankfurt endpoint, project,
+candidate model, and PaperScape Chat provider path. The one-run approval was
+consumed. Tier B remained separately blocked.
+
+---
+
+## Sub-task 11 Stage 2 — Tier B preparation
+
+**Status:** Implemented and offline-verified; Tier B not executed
+
+This deadline-bounded stage:
+
+- promoted the application default to `ibm/granite-4-h-small`;
+- added the exact configuration assertion;
+- added the separately selectable
+  `test_live_research_map_service` Tier B harness;
+- used the real `ResearchMapService`, real `WatsonxProvider`, existing extraction
+  fixture, prompt, schema validation, grounding validation, and corrective retry;
+- counted public provider `generate` calls through an unchanged delegate;
+- recorded provider calls, corrective retries, and generation time without
+  printing prompts, output, credentials, raw responses, or exception bodies;
+- kept both live tests behind the existing two paid-test gates.
+
+Offline verification recorded:
+
+- config tests: 15 passed;
+- live-gate safety tests: 8 passed;
+- live module: 2 skipped;
+- provider tests: 94 passed;
+- ResearchMap tests: 67 passed;
+- integration tests: 2 passed;
+- backend collection: 456 tests;
+- complete backend suite: 454 passed, 2 skipped;
+- deterministic offline ResearchMap evaluation: passed;
+- `pip check`: passed;
+- Dart format: 23 files checked, 0 changed;
+- Flutter analysis: no issues;
+- Flutter tests: 42 passed;
+- Flutter Web release build: passed.
+
+Both live gates remained absent during verification. No live watsonx call
+occurred, no credential was inspected, and Tier B still requires a separate
+paid-run decision. No evaluator, Tier C automation, prompt, frontend source,
+Compose, database, or job-orchestration change was added.
+
+### Execution record
+
+- Executed on: 2026-07-30
+- Outcome: passed
+- Test: `test_live_research_map_service`
+- Selection: `-k research_map_service`
+- Model: `ibm/granite-4-h-small`
+- Region: Frankfurt (`eu-de`)
+- Result: `1 passed, 1 deselected`
+- Execution time: `11.60s`
+- Automatic or manual rerun: no
+- Generated ResearchMap persisted or printed: no
+- Credentials, project identifiers, prompts, and raw responses recorded: no
+- Approval status: consumed
+
+### Tier B conclusion
+
+The real watsonx Chat provider successfully generated a ResearchMap that passed
+the existing PaperScape schema and evidence-grounding validation against the
+controlled extraction fixture.
+
+This authorizes preparation of one manually controlled Tier C browser workflow
+using an approved open-access PDF. It does not authorize repeated Tier B calls,
+the three-paper evaluator, or unrelated paid model testing.
+
+---
+
+## Sub-task 11 Tier C — diagnostic preparation
+
+The real nine-page selectable-text PDF extracted successfully with
+`page_count=9` and `chunk_count=148`. The first real background ResearchMap job
+failed safely with `map_generation_failed`, but the exact validation causes were
+not observable.
+
+Safe diagnostics were added to preserve and log only allowlisted, sorted
+ResearchMap validation issue-code names across the initial attempt, corrective
+attempt, and background runner boundary. The persisted/public job error remains
+`map_generation_failed`. No prompt or validation rule was changed, and a paid
+diagnostic rerun has not yet occurred.
+
+### Evidence-normalization preparation
+
+The first real generation attempt failed only `EXCERPT_NOT_FOUND`; the
+corrective attempt then failed `INVALID_SCHEMA`. A conservative
+representation-normalization change was added only to evidence excerpt
+containment to tolerate harmless PDF extraction and model text-serialization
+artifacts.
+
+The change retains exact chunk ID and page validation plus contiguous substring
+containment. It introduces no fuzzy, semantic, or paraphrase matching. No paid
+rerun occurred during implementation.
+
+#### Boundary-integrity correction
+
+A read-only follow-up audit showed that shorter contiguous substrings could omit
+leading signs or qualifiers and trailing percentages, units, range bounds, or
+parts of numbers or apostrophe/hyphen-joined words. Deterministic
+evidence-boundary checks were added to reject those truncations while preserving
+exact normalized substring matching and established long-excerpt behavior. No
+fuzzy or semantic similarity was introduced, and no paid rerun occurred.
+
+### Deterministic evidence-span preparation
+
+Conservative normalization did not resolve the real `EXCERPT_NOT_FOUND`
+result, and the corrective attempt again returned `INVALID_SCHEMA`. The backend
+now segments the already-selected chunks into deterministic exact source spans
+of at most 300 characters, assigns stable document-order IDs
+(`E0001`, `E0002`, ...), and asks the model to return only those IDs. Valid IDs
+are resolved by the backend into the existing public `chunk_id`, `page`, and
+`excerpt` fields, so model-authored excerpts can no longer cause
+`EXCERPT_NOT_FOUND`.
+
+Unknown or case-mismatched IDs produce only the safe
+`UNKNOWN_EVIDENCE_ID` diagnostic, and the corrective prompt lists valid evidence
+IDs only. The superseded evidence-normalization and boundary-matching code was
+removed; no fuzzy or semantic matching was added. Provider behavior, model
+configuration, retry count, public schemas, API behavior, and job orchestration
+were not changed. No live or paid rerun occurred during implementation.
+
+### Claim-to-evidence specificity preparation
+
+The evidence-ID Tier C job succeeded operationally, but manual semantic review
+rejected its map: all three findings reused one generic broad-association span
+while adding unsupported subgroup thresholds, specific outcomes, and an
+exception.
+
+The backend now rejects identical complete evidence-ID sets across distinct
+findings and requires critical numeric surface details in each finding to occur
+in that finding's selected exact spans. The bounded guard covers digit
+quantities, comparators, plus thresholds, percentages, ranges, confidence
+intervals, and quantitative number words from zero through twenty using only
+conservative representation normalization. Diagnostics expose only
+`DUPLICATE_FINDING_EVIDENCE` or `UNSUPPORTED_CLAIM_DETAIL`.
+
+This safeguard is not claimed to provide complete semantic entailment and does
+not formally validate ordinary non-numeric paraphrasing. Deterministic spans,
+backend-owned public provenance, provider/model behavior, retry count, and
+public API shape remain unchanged. No live or paid call occurred during
+implementation.
+
+#### Specificity-guard audit corrections
+
+The first specificity implementation remained uncommitted while a read-only
+audit identified three defects: cross-span concatenation could create a
+synthetic quantitative match, repeated unknown IDs could also trigger a
+duplicate-finding-evidence code, and standalone quantitative number words were
+not detected.
+
+The validator now checks each critical expression against individual spans,
+skips duplicate-set and specificity checks for findings with unresolved IDs,
+and recognizes zero-through-twenty terminal number words only in bounded
+total/count/number/quantity/amount/sample-size constructions with an allowed
+copula. Non-quantitative section, group, category, model, and version labels are
+excluded. The safeguard remains lexical and is not full semantic entailment.
+No live or paid call occurred.
+
+### Numeric-token boundary remediation
+
+The second read-only audit found numeric-subtoken false positives caused by
+word-only boundaries. Quantitative-token-aware matching now prevents shorter
+details from matching inside decimals, percentages, suffix-plus thresholds,
+signed values, larger numbers, and slash/colon ratios, while preserving exact
+bare, percentage, suffix-plus, signed, comparator, range, decimal, and
+confidence-interval matches. Regression coverage was added for each case. No
+prompt or public API behavior changed, and no live call occurred.
+
+### Issue-specific conservative specificity retry
+
+The next real PDF run produced `UNSUPPORTED_CLAIM_DETAIL` on both the initial
+and generic corrective attempts. This confirmed the guard was functioning, but
+also showed that the generic correction was insufficient. The existing single
+corrective attempt now adds a conservative qualitative fallback for this issue,
+requiring concise evidence-level associations, valid IDs, and distinct complete
+finding evidence sets while preferring removal of unsupported quantitative and
+compound detail. Validation was not weakened, no additional retry was added,
+and no live or paid call occurred during implementation.
+
+### Bounded lexical claim-support guard
+
+The recorded conservative retry succeeded operationally, but manual review
+accepted the first finding and rejected the second and third. Exact
+provenance and numeric validation were insufficient for these nonnumeric
+claims, so a bounded lexical-support guard was added.
+
+For each resolved finding, the guard matches contiguous token sequences of at
+least two tokens within one cited evidence span. It uses only NFKC, case
+folding, punctuation boundaries, whitespace normalization, a small explicit
+stop/boilerplate set, and exclusion of generic overlap already present in the
+research question. No semantic or fuzzy matching was introduced. The safe
+`INSUFFICIENT_LEXICAL_SUPPORT` code and issue-specific retry guidance do not
+log phrases, source text, or failed output. Unknown-ID isolation and all
+existing duplicate-set, numeric-detail, and individual-span checks remain
+unchanged. No live call occurred during this work.
+
+### Deterministic integration fixture lexical-support remediation
+
+The complete suite exposed a stale deterministic happy-path fixture. The
+fixture assumed positional evidence IDs, which no longer satisfied the
+production lexical guard and then collided under existing duplicate-set
+validation. Production validation was not weakened.
+
+The fake provider now selects IDs by exact phrases in the real evidence
+catalogue, and the one-page synthetic PDF has deterministic sentence
+boundaries for distinct finding spans. The happy path succeeds with one
+provider call; no live call occurred.
+
+### Unconditional final corrective-response contract
+
+The latest real job first failed `DUPLICATE_FINDING_EVIDENCE` and
+`UNSUPPORTED_CLAIM_DETAIL`. Its corrective response fixed both but introduced
+unsupported qualitative findings, producing
+`INSUFFICIENT_LEXICAL_SUPPORT` on attempt two and a final
+`map_generation_failed`. Conditional first-attempt guidance was therefore
+insufficient under the fixed two-call limit.
+
+Every corrective prompt now includes the complete grounding contract:
+exact valid IDs, distinct evidence sets, concise noncausal associations,
+outcome-naming exact source phrases, individual-span numeric support, and
+removal of uncertain detail. Conditional issue-specific blocks still compose
+as additional emphasis. No validator, initial prompt, public provenance, or
+provider-call bound changed, and no live call occurred.
+
+### Provider-failure-only deterministic extractive fallback
+
+Earlier real executions proved that PaperScape reaches Granite and validates
+its structured output. Monthly watsonx token availability subsequently became
+unreliable. Granite remains first, including the existing corrective call and
+validators, but an `LLMProviderError` can now activate an injected deterministic
+extractive service.
+
+The service selects exactly three distinct, sufficiently diverse complete
+sentences from real extraction chunks. Statements and excerpts are the same
+normalized source sentence, with real chunk IDs, one-based pages, and partial
+confidence. It performs no semantic synthesis, paraphrasing, provider call,
+network access, environment lookup, or padding. If it cannot find three safe
+sentences, the job retains the existing safe `llm_provider_error` outcome.
+Model-validation failures and `MapGenerationError` never activate it.
+
+An additive internal metadata table records `granite` or
+`deterministic_extractive_fallback`, the permitted fallback reason, and the
+generation timestamp in the same transaction as `map_json`. The public
+`ResearchMap` response remains unchanged and contains no generation mode,
+fallback reason, score, or diagnostics.
+
+Demo note: PaperScape uses Granite first. When the AI provider is unavailable,
+it can degrade safely to an internally labelled deterministic extractive map
+rather than fabricating unsupported claims.
+
+No live, network, paid, or watsonx call occurred during implementation.
+
+### Final deterministic-fallback audit remediation
+
+The final audit identified a caller-owned transaction atomicity risk, naive
+abbreviation and heading boundaries, method-only candidates without section
+metadata, and eager fallback construction. Caller-owned `ResearchMapStore`
+saves now use a fixed internal savepoint, so repository writes roll back
+together without discarding unrelated outer transaction changes.
+
+The deterministic scanner is abbreviation-, initial-, heading-, and
+closing-punctuation-aware while preserving decimals and exact normalized source
+wording. High-confidence procedural patterns now reject unlabelled method-only
+sentences without excluding result statements merely for mentioning an
+adjusted model or analysis. A zero-argument factory keeps fallback construction
+lazy until `LLMProviderError`; Granite success and validation failures never
+construct it. Public APIs, job errors, prompts, validators, evidence rules, and
+diversity behavior are unchanged. No live, network, paid, or watsonx call
+occurred during remediation.
+
+The final commit-readiness audit found one remaining uppercase-continuation
+case: `U.S.`, `U.K.`, or `vs.` followed by a capitalized proper noun could be
+treated as a sentence boundary and expose an eligible trailing fragment. The
+scanner now preserves those continuations while retaining terminal behavior at
+the end of a block or before closing punctuation. Focused scanner and
+service-level regressions cover all three forms.
+
+The next read-only audits found the complementary terminal case: a complete
+sentence ending in `U.S.` or `U.K.` could be joined to a following sentence,
+and a finite starter allowlist could not cover arbitrary research subjects or
+proper names. The deterministic scanner now fails closed for that ambiguity.
+Uppercase text following `U.S.`, `U.K.`, or `vs.` is ambiguous by default and
+the affected span is excluded rather than split into a fragment or joined
+across source sentences. This decision no longer depends on the finding
+eligibility rule or its six-token minimum. Only narrow structurally incomplete
+prefixes preserve the established `The U.S. Department`, `The U.K. Biobank`,
+and `Treatment vs. Control` continuations; clear end-of-block terminals remain
+intact.
+
+The final audit found that passive measurement, assessment, evaluation,
+fitting, training, collection, and recording procedures could escape when the
+instrument was absent from the method-object list. A bounded passive-procedure
+rule now rejects complete `was`/`were ... using`/`with`/`by` constructions
+without broadly rejecting result vocabulary. The audit also found that generic
+title-case heading detection could remove the first line of a wrapped result.
+Title-case lines carrying finding, procedural, or continuation evidence now
+remain body text and join before sentence filtering; known, standalone-label,
+and all-caps headings remain excluded. No live, network, paid, or watsonx call
+occurred.
+
+A successful real-paper fallback run produced three acceptable findings, but
+manual review identified a limitation-selection false positive: the paper title
+was selected solely because it contained `cross-sectional`. Direct limitation
+cues are now bounded, while contextual design descriptors require explicit
+limitation framing or consequence wording in the same sentence. Title-like
+topic/subtitle text and bare design labels are excluded, and the existing fixed
+transparent limitation is used when no genuine limitation sentence is
+available. No live, network, paid, or watsonx call occurred.
+
+The final limitation-only remediation generalized caution wording to a bounded
+subject-independent `interpreted with caution`/`interpreted cautiously` rule,
+tightened the special `Because ...` allowance to require a finite subordinate
+clause plus a complete consequence predicate, and added a limitation-specific
+title-style noun-phrase rejection independent of wrapped-body heading logic.
+Complete title-cased limitation claims remain eligible. Finding eligibility,
+stable exact-source selection, fallback activation, transaction behavior,
+metadata, and public responses are unchanged. No live, network, paid, or
+watsonx call occurred.

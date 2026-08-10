@@ -20,6 +20,8 @@ import json
 import logging
 import re
 import unicodedata
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,39 @@ _DISCLAIMER: str = (
     "does not replace expert review."
 )
 _CONTEXT_SENTINEL: str = "__PAPER_CONTEXT_JSON__"
+_MAX_EVIDENCE_SPAN_CHARS: int = 300
+_FINAL_CORRECTIVE_RESPONSE_CONTRACT: str = (
+    "FINAL CORRECTIVE RESPONSE CONTRACT\n"
+    "1. Regenerate the complete JSON object from scratch.\n"
+    "2. Return exactly three findings and at least one limitation.\n"
+    "3. Use only exact valid evidence IDs from the supplied catalogue.\n"
+    "4. Give every finding a distinct complete evidence-ID set.\n"
+    "5. State one concise association per finding.\n"
+    "6. Preserve association language and avoid causal claims.\n"
+    "7. Include in every finding a meaningful contiguous phrase of at least "
+    "two words appearing exactly in one of that finding's cited evidence "
+    "spans.\n"
+    "8. Ensure that phrase names the claimed outcome, observation, comparison, "
+    "or limitation rather than only repeating generic research-question "
+    "terms.\n"
+    "9. Do not rely only on generic subject overlap such as:\n"
+    "   - social media use\n"
+    "   - sleep patterns\n"
+    "   - UK adolescents\n"
+    "10. Use numerical details only when the complete exact expression appears "
+    "inside one individual cited evidence span.\n"
+    "11. Remove numerical detail when exact support is uncertain.\n"
+    "12. Prefer one strong evidence ID per finding; use additional IDs only "
+    "where genuinely necessary.\n"
+    "13. Keep findings short enough that the selected evidence directly "
+    "supports the entire statement.\n\n"
+    "CONSTRUCTION GUIDANCE\n"
+    "- Select the supporting evidence span first.\n"
+    "- Preserve a short exact phrase from that span in the finding statement.\n"
+    "- Ensure that the preserved phrase names the finding's actual outcome.\n"
+    "- Then return only the required JSON.\n"
+    "- Do not provide chain-of-thought, reasoning, prose, or commentary."
+)
 
 # Section-priority configuration.
 # Keys are lower-cased section keywords; values are the priority rank
@@ -58,15 +93,6 @@ _EXCLUDED_SECTION_KEYWORDS: frozenset[str] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
-
-class MapGenerationError(RuntimeError):
-    """The model did not produce a valid grounded research map."""
-
-
-# ---------------------------------------------------------------------------
 # Issue codes for corrective retry
 # ---------------------------------------------------------------------------
 
@@ -75,13 +101,59 @@ class _IssueCode:
     INVALID_JSON = "INVALID_JSON"
     INVALID_SCHEMA = "INVALID_SCHEMA"
     WRONG_FINDING_COUNT = "WRONG_FINDING_COUNT"
-    UNKNOWN_CHUNK_ID = "UNKNOWN_CHUNK_ID"
-    PAGE_MISMATCH = "PAGE_MISMATCH"
-    EXCERPT_NOT_FOUND = "EXCERPT_NOT_FOUND"
+    UNKNOWN_EVIDENCE_ID = "UNKNOWN_EVIDENCE_ID"
     DUPLICATE_FINDING = "DUPLICATE_FINDING"
     DUPLICATE_EVIDENCE = "DUPLICATE_EVIDENCE"
+    DUPLICATE_FINDING_EVIDENCE = "DUPLICATE_FINDING_EVIDENCE"
+    UNSUPPORTED_CLAIM_DETAIL = "UNSUPPORTED_CLAIM_DETAIL"
+    INSUFFICIENT_LEXICAL_SUPPORT = "INSUFFICIENT_LEXICAL_SUPPORT"
     MISSING_LIMITATION = "MISSING_LIMITATION"
     UNCERTAIN_CONFIDENCE = "UNCERTAIN_CONFIDENCE"
+
+
+_SAFE_ISSUE_CODES: frozenset[str] = frozenset(
+    {
+        _IssueCode.INVALID_JSON,
+        _IssueCode.INVALID_SCHEMA,
+        _IssueCode.WRONG_FINDING_COUNT,
+        _IssueCode.UNKNOWN_EVIDENCE_ID,
+        _IssueCode.DUPLICATE_FINDING,
+        _IssueCode.DUPLICATE_EVIDENCE,
+        _IssueCode.DUPLICATE_FINDING_EVIDENCE,
+        _IssueCode.UNSUPPORTED_CLAIM_DETAIL,
+        _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT,
+        _IssueCode.MISSING_LIMITATION,
+        _IssueCode.UNCERTAIN_CONFIDENCE,
+    }
+)
+
+
+def _safe_issue_codes(issue_codes: Iterable[str]) -> frozenset[str]:
+    """Return only fixed, non-sensitive ResearchMap validation issue codes."""
+    return frozenset(issue_codes) & _SAFE_ISSUE_CODES
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class MapGenerationError(RuntimeError):
+    """The model did not produce a valid grounded research map."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        issue_codes: Iterable[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self._issue_codes = _safe_issue_codes(issue_codes or ())
+
+    @property
+    def issue_codes(self) -> frozenset[str]:
+        """Return the safe validation issue codes carried by this error."""
+        return self._issue_codes
 
 
 # ---------------------------------------------------------------------------
@@ -96,28 +168,247 @@ def _normalize_text(text: str) -> str:
     return collapsed.strip()
 
 
+# Conservative surface normalization used only by the bounded finding-detail
+# guard. It does not alter source spans or public excerpts.
+_DETAIL_TRANSLATION = str.maketrans(
+    {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2015": "-",
+        "\u2264": "<=",
+        "\u2265": ">=",
+    }
+)
+_NUMBER_SURFACE = r"(?:\d+(?:,\d{3})*(?:\.\d+)?)"
+_SIGNED_NUMBER_SURFACE = rf"(?:[+\-\u2212]?{_NUMBER_SURFACE})"
+_COMPARATOR_SURFACE = r"(?:<=|>=|<|>)"
+_CRITICAL_DIGIT_DETAIL = re.compile(
+    rf"""
+    (?<!\w)
+    (?:
+        {_SIGNED_NUMBER_SURFACE}
+        \s*(?:-|to)\s*
+        (?:{_COMPARATOR_SURFACE})?\s*
+        {_SIGNED_NUMBER_SURFACE}
+        (?:\s*%)?
+      |
+        (?:{_COMPARATOR_SURFACE})?\s*
+        {_SIGNED_NUMBER_SURFACE}
+        (?:\+|%)?
+    )
+    (?!\w)
+    """,
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+_NUMBER_WORDS = (
+    "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    "twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+    "nineteen|twenty"
+)
+_CRITICAL_NUMBER_WORD_DETAIL = re.compile(
+    rf"\b(?:all\s+)?(?:{_NUMBER_WORDS})\b(?=\s+[^\W\d_])",
+    flags=re.IGNORECASE | re.UNICODE,
+)
+_NON_QUANTITATIVE_NUMBER_WORD_PREFIX = re.compile(
+    r"\b(?:section|group|category|model|version)\s+$",
+    flags=re.IGNORECASE,
+)
+_QUANTITATIVE_CUE = (
+    r"(?:measured\s+total|reported\s+count|observed\s+number|"
+    r"number\s+observed|sample\s+size|total|count|number|quantity|amount)"
+)
+_QUANTITATIVE_COPULA = r"(?:is|are|was|were|equals|equalled)"
+_CRITICAL_STANDALONE_NUMBER_WORD_DETAIL = re.compile(
+    rf"\b{_QUANTITATIVE_CUE}\s+{_QUANTITATIVE_COPULA}\s+"
+    rf"(?P<number>{_NUMBER_WORDS})\b(?=\s*(?:[.,;:!?)]|$))",
+    flags=re.IGNORECASE,
+)
+# Characters that continue a quantitative token. These are intentionally
+# stricter than word boundaries: punctuation such as decimal points, percent
+# signs, signs, comparators, and ratio separators can still be part of a
+# larger numeric expression.
+_NUMERIC_TOKEN_CONTINUATION = r"\w%+\-\u2212\u2010\u2011\u2012\u2013\u2014\u2015<>=/:"
+
+
+def _normalize_claim_detail_text(text: str) -> str:
+    """Normalize only conservative representation variants for comparison."""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = normalized.translate(_DETAIL_TRANSLATION)
+    normalized = re.sub(r"(<=|>=|<|>)\s*", r"\1", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _extract_critical_details(statement: str) -> tuple[str, ...]:
+    """Extract bounded quantitative surface expressions from a finding."""
+    normalized = _normalize_claim_detail_text(statement)
+    matches = [
+        (match.start(), match.group(0).strip())
+        for match in _CRITICAL_DIGIT_DETAIL.finditer(normalized)
+    ]
+    for match in _CRITICAL_NUMBER_WORD_DETAIL.finditer(normalized):
+        if _NON_QUANTITATIVE_NUMBER_WORD_PREFIX.search(
+            normalized[:match.start()]
+        ):
+            continue
+        matches.append((match.start(), match.group(0).strip()))
+    matches.extend(
+        (match.start("number"), match.group("number"))
+        for match in _CRITICAL_STANDALONE_NUMBER_WORD_DETAIL.finditer(
+            normalized
+        )
+    )
+    matches.sort(key=lambda item: item[0])
+    return tuple(dict.fromkeys(detail for _, detail in matches))
+
+
+def _contains_critical_detail(
+    normalized_span: str,
+    normalized_detail: str,
+) -> bool:
+    """Return whether a detail occurs as a complete lexical token in a span."""
+    escaped_detail = re.escape(normalized_detail)
+    if any(char.isdigit() for char in normalized_detail):
+        continuation = _NUMERIC_TOKEN_CONTINUATION
+        detail_pattern = (
+            rf"(?<![{continuation}.,]){escaped_detail}"
+            rf"(?![{continuation}]|[.,](?=\d))"
+        )
+    else:
+        detail_pattern = rf"(?<!\w){escaped_detail}(?!\w)"
+    return re.search(detail_pattern, normalized_span) is not None
+
+
+def _critical_details_supported(
+    statement: str,
+    evidence_spans: Iterable[str],
+) -> bool:
+    """Return whether each detail occurs wholly within one selected span."""
+    normalized_spans = tuple(
+        _normalize_claim_detail_text(span) for span in evidence_spans
+    )
+    for detail in _extract_critical_details(statement):
+        if not any(
+            _contains_critical_detail(span, detail)
+            for span in normalized_spans
+        ):
+            return False
+    return True
+
+
+# This set is intentionally small and domain-agnostic. It excludes relation
+# boilerplate from qualifying as a meaningful lexical anchor without changing
+# the tokens used by any public field or source span.
+_LEXICAL_ANCHOR_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "associated",
+        "association",
+        "with",
+        "between",
+        "greater",
+        "higher",
+        "lower",
+        "more",
+        "less",
+        "was",
+        "were",
+        "is",
+        "are",
+        "the",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "and",
+        "or",
+        "as",
+        "than",
+        "for",
+        "by",
+        "on",
+        "from",
+    }
+)
+
+
+def _normalize_lexical_tokens(text: str) -> tuple[str, ...]:
+    """Return conservative tokens for the bounded lexical-support guard."""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
+    return tuple(normalized.split())
+
+
+def _has_lexical_anchor(
+    statement: str,
+    evidence_spans: Iterable[str],
+    research_question: str,
+) -> bool:
+    """Return whether one cited span contains a meaningful shared token run.
+
+    Matching is deliberately lexical only: tokens must remain contiguous in
+    both the finding and one individual evidence span. No stemming,
+    lemmatization, synonym expansion, fuzzy matching, reordering, embedding,
+    or semantic similarity is performed.
+    """
+    finding_tokens = _normalize_lexical_tokens(statement)
+    question_tokens = set(_normalize_lexical_tokens(research_question))
+    if len(finding_tokens) < 2:
+        return False
+
+    for span in evidence_spans:
+        span_tokens = _normalize_lexical_tokens(span)
+        span_ngrams = {
+            span_tokens[start : start + length]
+            for length in range(2, len(span_tokens) + 1)
+            for start in range(len(span_tokens) - length + 1)
+        }
+        for length in range(2, len(finding_tokens) + 1):
+            for start in range(len(finding_tokens) - length + 1):
+                sequence = finding_tokens[start : start + length]
+                if sequence not in span_ngrams:
+                    continue
+                if any(
+                    token not in _LEXICAL_ANCHOR_STOP_WORDS
+                    and token not in question_tokens
+                    for token in sequence
+                ):
+                    return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Internal grounded schemas (private)
 # ---------------------------------------------------------------------------
 
 
-class _InternalEvidence(BaseModel):
-    """A single evidence record as returned by the model."""
+@dataclass(frozen=True, slots=True)
+class _EvidenceSpan:
+    """Backend-owned source span exposed to the model by an opaque ID."""
+
+    evidence_id: str
+    chunk_id: str
+    page: int
+    section: str | None
+    text: str
+
+
+class _InternalEvidenceReference(BaseModel):
+    """A model-returned reference to a backend-owned evidence span."""
 
     model_config = ConfigDict(extra="forbid")
 
-    chunk_id: str = Field(min_length=1)
-    page: int = Field(ge=1)
-    excerpt: str = Field(min_length=1, max_length=300)
+    evidence_id: str = Field(min_length=1)
 
-    @field_validator("chunk_id", "excerpt", mode="before")
+    @field_validator("evidence_id", mode="before")
     @classmethod
-    def _strip_and_require_nonblank(cls, v: object) -> object:
+    def _require_nonblank(cls, v: object) -> object:
         if isinstance(v, str):
-            stripped = v.strip()
-            if not stripped:
+            if not v.strip():
                 raise ValueError("Field must not be blank or whitespace-only.")
-            return stripped
         return v
 
 
@@ -127,7 +418,7 @@ class _InternalGroundedStatement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     statement: str = Field(min_length=1)
-    evidence: list[_InternalEvidence] = Field(min_length=1)
+    evidence: list[_InternalEvidenceReference] = Field(min_length=1)
 
     @field_validator("statement", mode="before")
     @classmethod
@@ -146,7 +437,7 @@ class _InternalFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     statement: str = Field(min_length=1)
-    evidence: list[_InternalEvidence] = Field(min_length=1)
+    evidence: list[_InternalEvidenceReference] = Field(min_length=1)
     confidence: str = Field(...)  # validated post-Pydantic for "high" | "partial"
 
     @field_validator("statement", mode="before")
@@ -225,6 +516,71 @@ def _word_count(text: str) -> int:
     return len(text.split())
 
 
+def _split_evidence_text(text: str) -> list[str]:
+    """Split source text into deterministic exact spans of at most 300 chars."""
+    if not text.strip():
+        return []
+
+    if len(text.strip()) <= _MAX_EVIDENCE_SPAN_CHARS:
+        return [text.strip()]
+
+    spans: list[str] = []
+    start = 0
+    text_length = len(text)
+
+    while start < text_length:
+        while start < text_length and text[start].isspace():
+            start += 1
+        if start >= text_length:
+            break
+
+        limit = min(start + _MAX_EVIDENCE_SPAN_CHARS, text_length)
+        end = limit
+
+        if limit < text_length:
+            paragraph_break = text.rfind("\n\n", start + 1, limit + 1)
+            if paragraph_break > start:
+                end = paragraph_break
+            else:
+                sentence_ends = list(
+                    re.finditer(r"[.!?](?=\s|$)", text[start:limit])
+                )
+                if sentence_ends:
+                    end = start + sentence_ends[-1].end()
+                else:
+                    whitespace_break = max(
+                        text.rfind(" ", start + 1, limit + 1),
+                        text.rfind("\n", start + 1, limit + 1),
+                        text.rfind("\t", start + 1, limit + 1),
+                    )
+                    if whitespace_break > start:
+                        end = whitespace_break
+
+        span = text[start:end].strip()
+        if span:
+            spans.append(span)
+        start = end
+
+    return spans
+
+
+def _build_evidence_catalogue(selected_chunks: list[Chunk]) -> list[_EvidenceSpan]:
+    """Build stable backend-owned evidence spans in selected-document order."""
+    catalogue: list[_EvidenceSpan] = []
+    for chunk in selected_chunks:
+        for text in _split_evidence_text(chunk.text):
+            catalogue.append(
+                _EvidenceSpan(
+                    evidence_id=f"E{len(catalogue) + 1:04d}",
+                    chunk_id=chunk.chunk_id,
+                    page=chunk.page,
+                    section=chunk.section,
+                    text=text,
+                )
+            )
+    return catalogue
+
+
 # ---------------------------------------------------------------------------
 # ResearchMapService
 # ---------------------------------------------------------------------------
@@ -290,9 +646,10 @@ class ResearchMapService:
         """
         # Step 1 — select bounded source chunks.
         selected = self._select_chunks(extraction)
+        evidence_catalogue = _build_evidence_catalogue(selected)
 
         # Step 2 — build the initial grounded prompt.
-        base_prompt = self._build_prompt(selected)
+        base_prompt = self._build_prompt(evidence_catalogue)
 
         # Step 3 — first generation attempt.
         issue_codes: set[str] = set()
@@ -302,23 +659,32 @@ class ResearchMapService:
                 max_tokens=_MAP_MAX_TOKENS,
                 temperature=_MAP_TEMPERATURE,
             )
-            parsed, issues = self._parse_and_validate(response, selected)
+            parsed, issues = self._parse_and_validate(response, evidence_catalogue)
             if not issues:
-                return self._to_public_map(parsed, extraction.paper_id)
-            issue_codes = issues
+                return self._to_public_map(
+                    parsed, extraction.paper_id, evidence_catalogue
+                )
+            issue_codes = set(_safe_issue_codes(issues))
         except MapGenerationError as exc:
-            # Collect issue codes from the exception for retry.
-            if hasattr(exc, "_issue_codes"):
-                issue_codes = exc._issue_codes  # type: ignore[attr-defined]
+            issue_codes = set(exc.issue_codes)
+            _log.warning(
+                "Research map validation failed: attempt=1 issue_codes=%s",
+                sorted(issue_codes) or ["UNKNOWN"],
+            )
             if not issue_codes:
                 raise  # Re-raise if no codes were captured.
         except LLMProviderError:
             # Provider failures propagate unchanged — no corrective retry.
             raise
+        else:
+            _log.warning(
+                "Research map validation failed: attempt=1 issue_codes=%s",
+                sorted(issue_codes) or ["UNKNOWN"],
+            )
 
         # Step 4 — corrective retry.
         corrective_prompt = self._build_corrective_prompt(
-            base_prompt, issue_codes, selected
+            base_prompt, issue_codes, evidence_catalogue
         )
         try:
             response = self._provider.generate(
@@ -326,16 +692,34 @@ class ResearchMapService:
                 max_tokens=_MAP_MAX_TOKENS,
                 temperature=_MAP_TEMPERATURE,
             )
-            parsed, remaining_issues = self._parse_and_validate(response, selected)
+            parsed, remaining_issues = self._parse_and_validate(
+                response, evidence_catalogue
+            )
             if remaining_issues:
-                raise MapGenerationError(
-                    "Research map generation failed after corrective retry."
+                final_error = MapGenerationError(
+                    "Research map generation failed after corrective retry.",
+                    issue_codes=remaining_issues,
                 )
-            return self._to_public_map(parsed, extraction.paper_id)
+            else:
+                return self._to_public_map(
+                    parsed, extraction.paper_id, evidence_catalogue
+                )
         except MapGenerationError as exc:
-            raise MapGenerationError(
-                "Research map generation failed after corrective retry."
-            ) from exc
+            final_error = MapGenerationError(
+                "Research map generation failed after corrective retry.",
+                issue_codes=exc.issue_codes,
+            )
+            _log.warning(
+                "Research map validation failed: attempt=2 issue_codes=%s",
+                sorted(final_error.issue_codes) or ["UNKNOWN"],
+            )
+            raise final_error from exc
+
+        _log.warning(
+            "Research map validation failed: attempt=2 issue_codes=%s",
+            sorted(final_error.issue_codes) or ["UNKNOWN"],
+        )
+        raise final_error
 
     # ------------------------------------------------------------------
     # Context selection
@@ -432,17 +816,18 @@ class ResearchMapService:
     # Prompt building
     # ------------------------------------------------------------------
 
-    def _build_prompt(self, selected_chunks: list[Chunk]) -> str:
-        """Build the full prompt string for the given *selected_chunks*."""
+    def _build_prompt(self, evidence_catalogue: list[_EvidenceSpan]) -> str:
+        """Build the full prompt string for the backend evidence catalogue."""
         serialized = json.dumps(
             [
                 {
-                    "chunk_id": c.chunk_id,
-                    "page": c.page,
-                    "section": c.section,
-                    "text": c.text,
+                    "evidence_id": span.evidence_id,
+                    "chunk_id": span.chunk_id,
+                    "page": span.page,
+                    "section": span.section,
+                    "text": span.text,
                 }
-                for c in selected_chunks
+                for span in evidence_catalogue
             ],
             ensure_ascii=False,
         )
@@ -456,23 +841,95 @@ class ResearchMapService:
         self,
         original_prompt: str,
         issue_codes: set[str],
-        selected_chunks: list[Chunk],
+        evidence_catalogue: list[_EvidenceSpan],
     ) -> str:
-        """Build a corrective prompt with safe issue codes and valid chunks."""
-        valid_chunks_json = json.dumps(
-            [
-                {"chunk_id": c.chunk_id, "page": c.page}
-                for c in selected_chunks
-            ],
-            ensure_ascii=False,
+        """Build a corrective prompt with safe issue codes and evidence IDs."""
+        valid_evidence_ids = json.dumps(
+            [span.evidence_id for span in evidence_catalogue]
         )
         codes_list = ", ".join(sorted(issue_codes))
+        issue_guidance: list[str] = []
+
+        if _IssueCode.UNKNOWN_EVIDENCE_ID in issue_codes:
+            issue_guidance.append(
+                "\n\nEXACT EVIDENCE-ID RETRY GUIDANCE\n"
+                "- Use only evidence_id values from the Valid evidence IDs list.\n"
+                "- Copy every evidence_id exactly, including its case.\n"
+                "- Do not invent or alter evidence IDs."
+            )
+
+        if _IssueCode.DUPLICATE_FINDING_EVIDENCE in issue_codes:
+            issue_guidance.append(
+                "\n\nDISTINCT FINDING EVIDENCE-SET RETRY GUIDANCE\n"
+                "- Use a different complete evidence-ID set for every finding.\n"
+                "- Findings may share an individual evidence ID only when their "
+                "complete evidence-ID sets differ."
+            )
+
+        if _IssueCode.UNSUPPORTED_CLAIM_DETAIL in issue_codes:
+            issue_guidance.append(
+                "\n\nCONSERVATIVE SPECIFICITY RETRY MODE\n"
+                "Regenerate the complete JSON object from scratch.\n"
+                "1. Return exactly three findings.\n"
+                "2. Return at least one limitation.\n"
+                "3. Continue using only valid evidence IDs.\n"
+                "4. Use a different complete evidence-ID set for every finding.\n"
+                "5. State one concise qualitative association per finding.\n"
+                "6. Keep each finding at the exact specificity level supported "
+                "by its cited evidence.\n"
+                "7. Prefer terminology that appears directly in the cited "
+                "evidence spans.\n"
+                "8. Select multiple evidence IDs when one span is insufficient.\n\n"
+                "For finding statements, do not use quantitative expressions "
+                "unless the selected evidence contains each complete expression "
+                "exactly within an individual cited span. This includes:\n"
+                "- digits, decimals, and signed quantities;\n"
+                "- percentages, odds ratios, and confidence intervals;\n"
+                "- numeric ranges, symbolic comparators, and plus-suffix "
+                "thresholds;\n"
+                "- ratios and number words zero through twenty;\n"
+                "- threshold-defined categories whose defining threshold is not "
+                "stated in the cited evidence;\n"
+                "- compound claims combining several unsupported outcomes or "
+                "exceptions.\n\n"
+                "Avoid exact usage-hour categories, exact counts, 'all six', "
+                "precise exceptions, and numerical effect sizes unless the "
+                "selected evidence contains those details exactly. For this "
+                "conservative retry, prefer removing quantitative detail rather "
+                "than trying to restate it.\n\n"
+                "Acceptable fallback forms include:\n"
+                "- 'Heavier social media use was associated with poorer sleep "
+                "patterns.'\n"
+                "- 'Greater social media use was associated with later sleep "
+                "timing.'\n"
+                "- 'Greater social media use was associated with difficulty "
+                "returning to sleep.'\n"
+                "These are format examples only. Use only the supplied paper "
+                "evidence."
+            )
+
+        if _IssueCode.INSUFFICIENT_LEXICAL_SUPPORT in issue_codes:
+            issue_guidance.append(
+                "\n\nBOUNDED LEXICAL-SUPPORT RETRY GUIDANCE\n"
+                "- Preserve a meaningful phrase of at least two consecutive "
+                "tokens from at least one selected evidence span in every "
+                "finding.\n"
+                "- Use terminology appearing directly in the cited evidence.\n"
+                "- Select a different evidence span when the current evidence "
+                "does not directly name the claimed outcome.\n"
+                "- Do not rely on generic subject overlap alone, such as "
+                "'social media use' or 'sleep patterns'.\n"
+                "- Keep findings concise rather than combining several claims."
+            )
+
         correction_section = (
             "\n\nCORRECTION REQUIRED\n"
             "The previous response contained the following issues:\n"
             f"{codes_list}\n\n"
-            "Valid chunk IDs and pages:\n"
-            f"{valid_chunks_json}\n\n"
+            "Valid evidence IDs:\n"
+            f"{valid_evidence_ids}\n\n"
+            f"{_FINAL_CORRECTIVE_RESPONSE_CONTRACT}"
+            f"{''.join(issue_guidance)}\n\n"
             "Regenerate the complete JSON research map. "
             "Return ONLY valid JSON. No markdown fences, prose, or commentary."
         )
@@ -485,7 +942,7 @@ class ResearchMapService:
     def _parse_and_validate(
         self,
         raw: str,
-        selected_chunks: list[Chunk],
+        evidence_catalogue: list[_EvidenceSpan],
     ) -> tuple[_InternalResearchMap, set[str]]:
         """Parse *raw* model output and validate it.
 
@@ -513,34 +970,36 @@ class ResearchMapService:
         elif trimmed.startswith("```") and not trimmed.startswith("```json"):
             # Plain ``` without json marker -> reject.
             issues.add(_IssueCode.INVALID_JSON)
-            exc = MapGenerationError("Model output uses unmarked code fences.")
-            exc._issue_codes = issues  # type: ignore[attr-defined]
-            raise exc
+            raise MapGenerationError(
+                "Model output uses unmarked code fences.",
+                issue_codes=issues,
+            )
 
         if not (trimmed.startswith("{") and trimmed.endswith("}")):
             issues.add(_IssueCode.INVALID_JSON)
-            exc = MapGenerationError("Model output does not contain a JSON object.")
-            exc._issue_codes = issues
-            raise exc
+            raise MapGenerationError(
+                "Model output does not contain a JSON object.",
+                issue_codes=issues,
+            )
 
         try:
             obj: dict[str, Any] = json.loads(trimmed)
         except json.JSONDecodeError:
             issues.add(_IssueCode.INVALID_JSON)
-            exc = MapGenerationError("Model output contains malformed JSON.")
-            exc._issue_codes = issues
-            raise exc
+            raise MapGenerationError(
+                "Model output contains malformed JSON.",
+                issue_codes=issues,
+            )
 
         # --- Step 2: Pydantic validation ---
         try:
             parsed = _InternalResearchMap.model_validate(obj)
         except Exception:
             issues.add(_IssueCode.INVALID_SCHEMA)
-            exc = MapGenerationError(
-                "Model output does not conform to the expected schema."
+            raise MapGenerationError(
+                "Model output does not conform to the expected schema.",
+                issue_codes=issues,
             )
-            exc._issue_codes = issues
-            raise exc
 
         # --- Step 3: specific schema post-checks ---
         if len(parsed.findings) != 3:
@@ -556,7 +1015,7 @@ class ResearchMapService:
                 issues.add(_IssueCode.UNCERTAIN_CONFIDENCE)
 
         # --- Step 4: evidence grounding ---
-        grounding_issues = self._validate_evidence(parsed, selected_chunks)
+        grounding_issues = self._validate_evidence(parsed, evidence_catalogue)
         issues.update(grounding_issues)
 
         return parsed, issues
@@ -568,19 +1027,21 @@ class ResearchMapService:
     def _validate_evidence(
         self,
         internal_map: _InternalResearchMap,
-        selected_chunks: list[Chunk],
+        evidence_catalogue: list[_EvidenceSpan],
     ) -> set[str]:
-        """Validate all evidence against the selected chunks.
+        """Validate all model-returned references against the catalogue.
 
         Returns a set of issue codes; an empty set means all evidence is valid.
         """
         issues: set[str] = set()
 
-        selected_lookup: dict[str, Chunk] = {
-            c.chunk_id: c for c in selected_chunks
+        evidence_lookup: dict[str, _EvidenceSpan] = {
+            span.evidence_id: span for span in evidence_catalogue
         }
 
-        all_grounded: list[tuple[str, list[_InternalEvidence], str]] = [
+        all_grounded: list[
+            tuple[str, list[_InternalEvidenceReference], str]
+        ] = [
             ("research_question", internal_map.research_question.evidence, ""),
         ]
         for idx, finding in enumerate(internal_map.findings):
@@ -595,35 +1056,72 @@ class ResearchMapService:
         if len(set(finding_statements_normalized)) != len(finding_statements_normalized):
             issues.add(_IssueCode.DUPLICATE_FINDING)
 
-        for label, evidence_list, owner_text in all_grounded:
-            seen_evidence_keys: set[tuple[str, int, str]] = set()
+        for _label, evidence_list, _owner_text in all_grounded:
+            seen_evidence_ids: set[str] = set()
 
-            for ev_idx, ev in enumerate(evidence_list):
-                # chunk_id exists in selected_lookup.
-                if ev.chunk_id not in selected_lookup:
-                    issues.add(_IssueCode.UNKNOWN_CHUNK_ID)
+            for evidence in evidence_list:
+                if evidence.evidence_id not in evidence_lookup:
+                    issues.add(_IssueCode.UNKNOWN_EVIDENCE_ID)
                     continue
 
-                source_chunk = selected_lookup[ev.chunk_id]
-
-                # page match.
-                if ev.page != source_chunk.page:
-                    issues.add(_IssueCode.PAGE_MISMATCH)
-                    continue
-
-                # excerpt containment.
-                norm_excerpt = _normalize_text(ev.excerpt)
-                norm_source = _normalize_text(source_chunk.text)
-                if norm_excerpt not in norm_source:
-                    issues.add(_IssueCode.EXCERPT_NOT_FOUND)
-                    continue
-
-                # exact duplicate evidence within this grounded statement.
-                ev_key = (ev.chunk_id, ev.page, norm_excerpt)
-                if ev_key in seen_evidence_keys:
+                if evidence.evidence_id in seen_evidence_ids:
                     issues.add(_IssueCode.DUPLICATE_EVIDENCE)
                 else:
-                    seen_evidence_keys.add(ev_key)
+                    seen_evidence_ids.add(evidence.evidence_id)
+
+        # Resolve finding evidence before downstream duplicate-set and
+        # specificity checks. Findings with unknown IDs are diagnosed above
+        # and deliberately excluded from both checks.
+        resolved_findings: list[
+            tuple[_InternalFinding, list[_EvidenceSpan]]
+        ] = []
+        for finding in internal_map.findings:
+            if not all(
+                evidence.evidence_id in evidence_lookup
+                for evidence in finding.evidence
+            ):
+                continue
+            resolved_findings.append(
+                (
+                    finding,
+                    [
+                        evidence_lookup[evidence.evidence_id]
+                        for evidence in finding.evidence
+                    ],
+                )
+            )
+
+        # Reject identical complete evidence-ID sets across fully resolved
+        # findings. Set comparison is intentionally order-insensitive.
+        seen_finding_evidence_sets: set[frozenset[str]] = set()
+        for finding, _resolved_spans in resolved_findings:
+            evidence_set = frozenset(
+                evidence.evidence_id for evidence in finding.evidence
+            )
+            if evidence_set in seen_finding_evidence_sets:
+                issues.add(_IssueCode.DUPLICATE_FINDING_EVIDENCE)
+            else:
+                seen_finding_evidence_sets.add(evidence_set)
+
+        # Each critical detail must occur wholly within at least one selected
+        # span. Different spans may support different details.
+        research_question = internal_map.research_question.statement
+        for finding, resolved_spans in resolved_findings:
+            evidence_spans = [
+                span.text
+                for span in resolved_spans
+            ]
+            if not _critical_details_supported(
+                finding.statement,
+                evidence_spans,
+            ):
+                issues.add(_IssueCode.UNSUPPORTED_CLAIM_DETAIL)
+            if not _has_lexical_anchor(
+                finding.statement,
+                evidence_spans,
+                research_question,
+            ):
+                issues.add(_IssueCode.INSUFFICIENT_LEXICAL_SUPPORT)
 
         # Check evidence presence for all grounded statements.
         if not internal_map.research_question.evidence:
@@ -647,8 +1145,12 @@ class ResearchMapService:
         self,
         internal: _InternalResearchMap,
         paper_id: str,
+        evidence_catalogue: list[_EvidenceSpan],
     ) -> ResearchMap:
         """Convert an internal draft to the public :class:`ResearchMap`."""
+        evidence_lookup = {
+            span.evidence_id: span for span in evidence_catalogue
+        }
         return ResearchMap(
             paper_id=paper_id,
             research_question=internal.research_question.statement,
@@ -657,9 +1159,9 @@ class ResearchMapService:
                     statement=f.statement,
                     evidence=[
                         Evidence(
-                            chunk_id=e.chunk_id,
-                            page=e.page,
-                            excerpt=e.excerpt,
+                            chunk_id=evidence_lookup[e.evidence_id].chunk_id,
+                            page=evidence_lookup[e.evidence_id].page,
+                            excerpt=evidence_lookup[e.evidence_id].text,
                         )
                         for e in f.evidence
                     ],

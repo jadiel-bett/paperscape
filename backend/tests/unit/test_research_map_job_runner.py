@@ -17,15 +17,23 @@ from app.models.paper import Chunk, ExtractionResult
 from app.models.research_map import Evidence, Finding, ResearchMap
 from app.repositories import (
     ExtractionStore,
+    GenerationMode,
     InvalidJobTransitionError,
     JobStore,
     PersistenceError,
     RecordNotFoundError,
     ResearchMapStore,
 )
+from app.services.extractive_research_map import (
+    ExtractiveFallbackError,
+    ExtractiveResearchMapService,
+)
 from app.services.llm_provider import LLMProviderError
 from app.services.research_map import MapGenerationError, ResearchMapService
-from app.services.research_map_job_runner import ResearchMapJobRunner
+from app.services.research_map_job_runner import (
+    ExtractiveFallbackFactory,
+    ResearchMapJobRunner,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -117,12 +125,18 @@ def _create_runner(
     extraction_store: ExtractionStore,
     research_map_store: ResearchMapStore,
     research_map_service: ResearchMapService,
+    extractive_fallback_factory: ExtractiveFallbackFactory | None = None,
 ) -> ResearchMapJobRunner:
     return ResearchMapJobRunner(
         job_store=job_store,
         extraction_store=extraction_store,
         research_map_store=research_map_store,
         research_map_service=research_map_service,
+        extractive_fallback_factory=(
+            extractive_fallback_factory
+            if extractive_fallback_factory is not None
+            else ExtractiveResearchMapService
+        ),
     )
 
 
@@ -253,10 +267,15 @@ def test_missing_extraction_marks_failed(
 
 
 def test_map_generation_error_marks_failed(
+    caplog: pytest.LogCaptureFixture,
     job_store: JobStore,
     extraction_store: ExtractionStore,
     research_map_store: ResearchMapStore,
 ) -> None:
+    caplog.set_level(
+        logging.ERROR,
+        logger="app.services.research_map_job_runner",
+    )
     paper_id = "p-map-err"
     extraction = _make_sample_extraction(paper_id)
     extraction_store.save(extraction)
@@ -272,28 +291,226 @@ def test_map_generation_error_marks_failed(
     assert final is not None
     assert final.status == JobStatus.FAILED
     assert final.error == "map_generation_failed"
+    assert (
+        "Research map generation failed: issue_codes=['UNKNOWN']"
+        in caplog.messages
+    )
 
 
-def test_llm_provider_error_marks_failed(
+def test_map_generation_error_logs_only_safe_sorted_issue_codes(
+    caplog: pytest.LogCaptureFixture,
+    job_store: JobStore,
+    extraction_store: ExtractionStore,
+    research_map_store: ResearchMapStore,
+) -> None:
+    caplog.set_level(
+        logging.DEBUG,
+        logger="app.services.research_map_job_runner",
+    )
+    chunk_sentinel = "SENTINEL_PAPER_CHUNK_TEXT"
+    extraction = ExtractionResult(
+        paper_id="p-safe-diagnostic",
+        filename="test.pdf",
+        chunks=[
+            Chunk(
+                chunk_id="p-safe-diagnostic-p1-1",
+                page=1,
+                text=chunk_sentinel,
+                section="Results",
+            )
+        ],
+    )
+    extraction_store.save(extraction)
+
+    failure = MapGenerationError(
+        "SENTINEL_PROMPT_TEXT SENTINEL_MODEL_OUTPUT",
+        issue_codes={
+            "DUPLICATE_FINDING_EVIDENCE",
+            "UNKNOWN_EVIDENCE_ID",
+            "INVALID_JSON",
+            "UNSUPPORTED_CLAIM_DETAIL",
+            "SENTINEL_UNSAFE_ISSUE_CODE",
+        },
+    )
+    failure.__cause__ = ValueError("SENTINEL_CHAINED_EXCEPTION")
+    failing_service = MagicMock(spec=ResearchMapService)
+    failing_service.generate_map.side_effect = failure
+
+    job = job_store.create(extraction.paper_id)
+    runner = _create_runner(
+        job_store,
+        extraction_store,
+        research_map_store,
+        failing_service,
+    )
+    runner.run(job.job_id)
+
+    final = job_store.get(job.job_id)
+    assert final is not None
+    assert final.status == JobStatus.FAILED
+    assert final.error == "map_generation_failed"
+    assert (
+        "Research map generation failed: "
+        "issue_codes=['DUPLICATE_FINDING_EVIDENCE', 'INVALID_JSON', "
+        "'UNKNOWN_EVIDENCE_ID', 'UNSUPPORTED_CLAIM_DETAIL']"
+        in caplog.messages
+    )
+    complete_log = caplog.text
+    assert "SENTINEL_PROMPT_TEXT" not in complete_log
+    assert "SENTINEL_MODEL_OUTPUT" not in complete_log
+    assert chunk_sentinel not in complete_log
+    assert "SENTINEL_CHAINED_EXCEPTION" not in complete_log
+    assert "SENTINEL_UNSAFE_ISSUE_CODE" not in complete_log
+
+
+def test_map_generation_error_never_calls_fallback(
+    job_store: JobStore,
+    extraction_store: ExtractionStore,
+    research_map_store: ResearchMapStore,
+) -> None:
+    paper_id = "p-map-no-fallback"
+    extraction_store.save(_make_sample_extraction(paper_id))
+    service = MagicMock(spec=ResearchMapService)
+    service.generate_map.side_effect = MapGenerationError("invalid model output")
+    fallback_factory = MagicMock()
+    job = job_store.create(paper_id)
+
+    _create_runner(
+        job_store,
+        extraction_store,
+        research_map_store,
+        service,
+        fallback_factory,
+    ).run(job.job_id)
+
+    fallback_factory.assert_not_called()
+    assert job_store.require(job.job_id).error == "map_generation_failed"
+
+
+def test_llm_provider_error_uses_fallback_and_succeeds(
     job_store: JobStore,
     extraction_store: ExtractionStore,
     research_map_store: ResearchMapStore,
 ) -> None:
     paper_id = "p-llm-err"
-    extraction = _make_sample_extraction(paper_id)
+    extraction = ExtractionResult(
+        paper_id=paper_id,
+        filename="test.pdf",
+        chunks=[
+            Chunk(
+                chunk_id=f"{paper_id}-p1-1",
+                page=1,
+                section="Results",
+                text="Higher attendance was observed among participants offered transport.",
+            ),
+            Chunk(
+                chunk_id=f"{paper_id}-p2-1",
+                page=2,
+                section="Results",
+                text="Lower attrition was associated with weekly appointment reminders.",
+            ),
+            Chunk(
+                chunk_id=f"{paper_id}-p3-1",
+                page=3,
+                section="Results",
+                text="A difference between groups was observed at final assessment.",
+            ),
+        ],
+    )
     extraction_store.save(extraction)
 
     failing_service = MagicMock(spec=ResearchMapService)
     failing_service.generate_map.side_effect = LLMProviderError("Provider down")
 
+    fallback = MagicMock(spec=ExtractiveResearchMapService)
+    fallback.generate.side_effect = ExtractiveResearchMapService().generate
+    fallback_factory = MagicMock(return_value=fallback)
     job = job_store.create(paper_id)
-    runner = _create_runner(job_store, extraction_store, research_map_store, failing_service)
+    runner = _create_runner(
+        job_store,
+        extraction_store,
+        research_map_store,
+        failing_service,
+        fallback_factory,
+    )
+    runner.run(job.job_id)
+
+    final = job_store.get(job.job_id)
+    assert final is not None
+    assert final.status == JobStatus.SUCCEEDED
+    assert final.error is None
+    assert failing_service.generate_map.call_count == 1
+    fallback_factory.assert_called_once_with()
+    fallback.generate.assert_called_once_with(extraction)
+    assert research_map_store.get(paper_id) is not None
+    metadata = research_map_store.get_generation_metadata(paper_id)
+    assert metadata is not None
+    assert metadata.generation_mode is GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK
+    assert metadata.fallback_reason == "llm_provider_error"
+
+
+def test_granite_success_does_not_call_fallback_and_persists_granite_metadata(
+    job_store: JobStore,
+    extraction_store: ExtractionStore,
+    research_map_store: ResearchMapStore,
+    fake_research_map_service: ResearchMapService,
+) -> None:
+    paper_id = "p-granite-metadata"
+    extraction_store.save(_make_sample_extraction(paper_id))
+    fallback_factory = MagicMock()
+    job = job_store.create(paper_id)
+
+    runner = _create_runner(
+        job_store,
+        extraction_store,
+        research_map_store,
+        fake_research_map_service,
+        fallback_factory,
+    )
+    runner.run(job.job_id)
+
+    fallback_factory.assert_not_called()
+    metadata = research_map_store.get_generation_metadata(paper_id)
+    assert metadata is not None
+    assert metadata.generation_mode is GenerationMode.GRANITE
+    assert metadata.fallback_reason is None
+    assert job_store.require(job.job_id).status == JobStatus.SUCCEEDED
+
+
+def test_llm_provider_error_and_fallback_failure_is_safe(
+    job_store: JobStore,
+    extraction_store: ExtractionStore,
+    research_map_store: ResearchMapStore,
+) -> None:
+    paper_id = "p-llm-fallback-err"
+    extraction_store.save(_make_sample_extraction(paper_id))
+    failing_service = MagicMock(spec=ResearchMapService)
+    failing_service.generate_map.side_effect = LLMProviderError(
+        "SENTINEL_RAW_PROVIDER_ERROR"
+    )
+    fallback = MagicMock(spec=ExtractiveResearchMapService)
+    fallback.generate.side_effect = ExtractiveFallbackError(
+        "SENTINEL_SOURCE_SENTENCE"
+    )
+    fallback_factory = MagicMock(return_value=fallback)
+    job = job_store.create(paper_id)
+
+    runner = _create_runner(
+        job_store,
+        extraction_store,
+        research_map_store,
+        failing_service,
+        fallback_factory,
+    )
     runner.run(job.job_id)
 
     final = job_store.get(job.job_id)
     assert final is not None
     assert final.status == JobStatus.FAILED
     assert final.error == "llm_provider_error"
+    assert research_map_store.get(paper_id) is None
+    fallback_factory.assert_called_once_with()
+    fallback.generate.assert_called_once_with(extraction_store.require(paper_id))
 
 
 def test_persistence_error_on_save_marks_failed(
@@ -348,6 +565,7 @@ def test_persistence_error_on_mark_succeeded(
         extraction_store=extraction_store,
         research_map_store=research_map_store,
         research_map_service=fake_research_map_service,
+        extractive_fallback_factory=ExtractiveResearchMapService,
     )
     runner.run(job.job_id)
 
@@ -360,6 +578,40 @@ def test_persistence_error_on_mark_succeeded(
     assert final is not None
     assert final.status == JobStatus.FAILED
     assert final.error == "persistence_error"
+
+
+def test_persistence_error_after_fallback_remains_safe(
+    job_store: JobStore,
+    extraction_store: ExtractionStore,
+) -> None:
+    paper_id = "p-fallback-persist-err"
+    extraction_store.save(_make_sample_extraction(paper_id))
+    service = MagicMock(spec=ResearchMapService)
+    service.generate_map.side_effect = LLMProviderError("provider unavailable")
+    fallback = MagicMock(spec=ExtractiveResearchMapService)
+    fallback.generate.return_value = _make_sample_research_map(paper_id)
+    fallback_factory = MagicMock(return_value=fallback)
+    failing_map_store = MagicMock(spec=ResearchMapStore)
+    failing_map_store.save.side_effect = PersistenceError("storage unavailable")
+    job = job_store.create(paper_id)
+
+    _create_runner(
+        job_store,
+        extraction_store,
+        failing_map_store,
+        service,
+        fallback_factory,
+    ).run(job.job_id)
+
+    final = job_store.require(job.job_id)
+    assert final.status == JobStatus.FAILED
+    assert final.error == "persistence_error"
+    failing_map_store.save.assert_called_once_with(
+        fallback.generate.return_value,
+        generation_mode=GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK,
+        fallback_reason="llm_provider_error",
+    )
+    fallback_factory.assert_called_once_with()
 
 
 def test_unexpected_exception_marks_failed(
@@ -517,6 +769,7 @@ def test_no_transaction_during_model_call(
         extraction_store=extraction_store,
         research_map_store=research_map_store,
         research_map_service=service,  # type: ignore[arg-type]
+        extractive_fallback_factory=ExtractiveResearchMapService,
     )
 
     job = job_store.create(paper_id)
@@ -609,6 +862,7 @@ def test_extraction_persistence_error_marks_failed(
         extraction_store=failing_ext_store,
         research_map_store=research_map_store,
         research_map_service=fake_research_map_service,
+        extractive_fallback_factory=ExtractiveResearchMapService,
     )
     runner.run(job.job_id)
 

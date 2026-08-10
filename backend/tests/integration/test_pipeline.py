@@ -19,8 +19,14 @@ from app.config import Settings
 from app.dependencies import ServiceContainer
 from app.main import create_app
 from app.models.job import JobStatus
-from app.repositories import ExtractionStore, JobStore, ResearchMapStore
+from app.repositories import (
+    ExtractionStore,
+    GenerationMode,
+    JobStore,
+    ResearchMapStore,
+)
 from app.services.extraction import ExtractionService
+from app.services.extractive_research_map import ExtractiveResearchMapService
 from app.services.llm_provider import LLMProvider, LLMProviderError
 from app.services.research_map import ResearchMapService
 from app.services.research_map_job_runner import ResearchMapJobRunner
@@ -47,17 +53,19 @@ def _make_selectable_pdf() -> bytes:
                 "modDate": "D:20250101000000+00'00'",
             }
         )
-        page = doc.new_page()
-        page.insert_text(
-            (72, 72),
-            "PaperScape test study\n"
+        pages = (
+            "PaperScape test study.\n"
             "Research question: Does a structured research map preserve evidence?\n"
-            "Finding one: The prototype extracts selectable text from uploaded PDFs.\n"
-            "Finding two: Each finding keeps chunk identifiers and one-based pages.\n"
-            "Finding three: Limitations remain visible for expert review.\n"
-            "Limitation: This synthetic document has one page and a small sample.",
-            fontsize=11,
+            "Results showed the prototype was associated with reliable selectable-text "
+            "extraction from uploaded PDFs.",
+            "Each finding was associated with retained chunk identifiers and one-based "
+            "pages.\n"
+            "This synthetic document has three pages and a small sample.",
+            "Limitations were more likely to remain visible during expert review.",
         )
+        for text in pages:
+            page = doc.new_page()
+            page.insert_text((72, 72), text, fontsize=11)
         return doc.tobytes(no_new_id=True)
     finally:
         doc.close()
@@ -78,17 +86,8 @@ def _extract_context(prompt: str) -> list[dict[str, Any]]:
     return context
 
 
-def _excerpt(text: str, marker: str) -> str:
-    """Return a short excerpt that is guaranteed to be contained in *text*."""
-    normalised = " ".join(text.split())
-    marker_index = normalised.find(marker)
-    if marker_index >= 0:
-        return normalised[marker_index: marker_index + 120]
-    return normalised[:120]
-
-
 class DeterministicProvider(LLMProvider):
-    """Fake provider returning valid internal-schema JSON using real chunks."""
+    """Fake provider returning valid evidence-ID JSON from the real catalogue."""
 
     def __init__(self) -> None:
         self.call_count = 0
@@ -104,45 +103,75 @@ class DeterministicProvider(LLMProvider):
         assert max_tokens > 0
         assert 0.0 <= temperature <= 2.0
         context = _extract_context(prompt)
-        chunk = context[0]
-        chunk_id = chunk["chunk_id"]
-        page = chunk["page"]
-        text = chunk["text"]
 
-        def evidence(marker: str) -> dict[str, Any]:
-            return {
-                "chunk_id": chunk_id,
-                "page": page,
-                "excerpt": _excerpt(text, marker),
-            }
+        def evidence_id_containing(required_phrase: str) -> str:
+            """Select one unambiguous catalogue span by exact source phrase."""
+            matches = [
+                item["evidence_id"]
+                for item in context
+                if required_phrase.casefold() in item["text"].casefold()
+            ]
+            if not matches:
+                raise AssertionError(
+                    f"No evidence span contains fixture phrase {required_phrase!r}."
+                )
+            if len(matches) > 1:
+                raise AssertionError(
+                    f"Fixture phrase {required_phrase!r} matches multiple evidence spans: "
+                    f"{matches!r}."
+                )
+            return matches[0]
+
+        research_question_evidence_id = evidence_id_containing(
+            "structured research map preserve evidence"
+        )
+        finding_evidence_ids = [
+            [evidence_id_containing("selectable-text extraction")],
+            [evidence_id_containing("chunk identifiers and one-based pages")],
+            [evidence_id_containing("limitations were more likely")],
+        ]
+        limitation_evidence_id = evidence_id_containing(
+            "synthetic document has three pages and a small sample"
+        )
+
+        def evidence(ids: list[str]) -> list[dict[str, Any]]:
+            return [{"evidence_id": evidence_id} for evidence_id in ids]
 
         return json.dumps(
             {
                 "research_question": {
                     "statement": "Does a structured research map preserve evidence?",
-                    "evidence": [evidence("Research question:")],
+                    "evidence": evidence([research_question_evidence_id]),
                 },
                 "findings": [
                     {
-                        "statement": "The prototype extracts selectable text from uploaded PDFs.",
-                        "evidence": [evidence("Finding one:")],
+                        "statement": (
+                            "Results showed the prototype was associated with reliable "
+                            "selectable-text extraction from uploaded PDFs."
+                        ),
+                        "evidence": evidence(finding_evidence_ids[0]),
                         "confidence": "high",
                     },
                     {
-                        "statement": "Findings keep chunk identifiers and one-based page provenance.",
-                        "evidence": [evidence("Finding two:")],
+                        "statement": (
+                            "Each finding was associated with retained chunk identifiers "
+                            "and one-based pages."
+                        ),
+                        "evidence": evidence(finding_evidence_ids[1]),
                         "confidence": "partial",
                     },
                     {
-                        "statement": "Limitations remain visible for expert review.",
-                        "evidence": [evidence("Finding three:")],
+                        "statement": (
+                            "Limitations were more likely to remain visible during expert review."
+                        ),
+                        "evidence": evidence(finding_evidence_ids[2]),
                         "confidence": "high",
                     },
                 ],
                 "limitations": [
                     {
                         "statement": "The test document is synthetic and intentionally small.",
-                        "evidence": [evidence("Limitation:")],
+                        "evidence": evidence([limitation_evidence_id]),
                     }
                 ],
             }
@@ -152,6 +181,9 @@ class DeterministicProvider(LLMProvider):
 class FailingProvider(LLMProvider):
     """Fake provider that fails through the real runner/provider-error path."""
 
+    def __init__(self) -> None:
+        self.call_count = 0
+
     def generate(
         self,
         prompt: str,
@@ -159,6 +191,7 @@ class FailingProvider(LLMProvider):
         max_tokens: int,
         temperature: float,
     ) -> str:
+        self.call_count += 1
         _extract_context(prompt)
         raise LLMProviderError("raw provider outage secret detail")
 
@@ -170,6 +203,7 @@ def _build_container(
     job_store = JobStore(settings.db_path)
     extraction_store = ExtractionStore(settings.db_path)
     research_map_store = ResearchMapStore(settings.db_path)
+    extractive_fallback_factory = ExtractiveResearchMapService
 
     def runner_factory() -> ResearchMapJobRunner:
         return ResearchMapJobRunner(
@@ -177,6 +211,7 @@ def _build_container(
             extraction_store=extraction_store,
             research_map_store=research_map_store,
             research_map_service=ResearchMapService(provider),
+            extractive_fallback_factory=extractive_fallback_factory,
         )
 
     return ServiceContainer(
@@ -185,6 +220,7 @@ def _build_container(
         job_store=job_store,
         extraction_store=extraction_store,
         research_map_store=research_map_store,
+        extractive_fallback_factory=extractive_fallback_factory,
         paper_id_factory=lambda: "11111111-1111-4111-8111-111111111111",
         job_runner_factory=runner_factory,
         job_creation_lock=threading.Lock(),
@@ -266,13 +302,37 @@ def test_pipeline_generates_and_persists_research_map(tmp_path: Path) -> None:
         assert research_map["disclaimer"] == _DISCLAIMER
 
         real_chunk_ids = {chunk.chunk_id for chunk in persisted_extraction.chunks}
-        for finding in research_map["findings"]:
+        finding_evidence_sets: list[frozenset[tuple[str, int, str]]] = []
+        expected_anchors = [
+            "selectable-text extraction",
+            "chunk identifiers and one-based pages",
+            "limitations were more likely",
+        ]
+        for finding, expected_anchor in zip(
+            research_map["findings"], expected_anchors, strict=True
+        ):
             assert finding["confidence"] in {"high", "partial"}
             assert finding["evidence"]
+            finding_evidence_sets.append(
+                frozenset(
+                    (
+                        evidence["chunk_id"],
+                        evidence["page"],
+                        evidence["excerpt"],
+                    )
+                    for evidence in finding["evidence"]
+                )
+            )
+            assert any(
+                expected_anchor.casefold() in evidence["excerpt"].casefold()
+                for evidence in finding["evidence"]
+            )
             for evidence in finding["evidence"]:
                 assert evidence["chunk_id"] in real_chunk_ids
                 assert evidence["page"] >= 1
                 assert evidence["excerpt"]
+
+        assert len(set(finding_evidence_sets)) == 3
 
         persisted_map = container.research_map_store.get(upload_data["paper_id"])
         assert persisted_map is not None
@@ -281,7 +341,8 @@ def test_pipeline_generates_and_persists_research_map(tmp_path: Path) -> None:
 
 
 def test_pipeline_provider_failure_is_safe(tmp_path: Path) -> None:
-    client, container = _make_client(tmp_path, FailingProvider())
+    provider = FailingProvider()
+    client, container = _make_client(tmp_path, provider)
     pdf_bytes = _make_selectable_pdf()
 
     with client:
@@ -292,19 +353,76 @@ def test_pipeline_provider_failure_is_safe(tmp_path: Path) -> None:
         status_data = status.json()
         assert status_data["job_id"] == job_data["job_id"]
         assert status_data["paper_id"] == upload_data["paper_id"]
-        assert status_data["status"] == JobStatus.FAILED
-        assert status_data["error"] == "llm_provider_error"
+        assert status_data["status"] == JobStatus.SUCCEEDED
+        assert status_data["error"] is None
         assert "raw provider outage secret detail" not in status.text
         assert "map_generation_failed" not in status.text
+        assert provider.call_count == 1
 
         persisted_job = container.job_store.get(job_data["job_id"])
         assert persisted_job is not None
-        assert persisted_job.status == JobStatus.FAILED
-        assert persisted_job.error == "llm_provider_error"
+        assert persisted_job.status == JobStatus.SUCCEEDED
+        assert persisted_job.error is None
         assert persisted_job.error != "raw provider outage secret detail"
 
         map_response = client.get(
             f"/api/v1/papers/{upload_data['paper_id']}/research-map"
         )
-        assert map_response.status_code == 404
-        assert map_response.json()["detail"]["code"] == "map_not_found"
+        assert map_response.status_code == 200
+        public_map = map_response.json()
+        assert set(public_map) == {
+            "paper_id",
+            "research_question",
+            "findings",
+            "limitations",
+            "disclaimer",
+        }
+        assert len(public_map["findings"]) == 3
+        extraction = container.extraction_store.require(upload_data["paper_id"])
+        chunks = {chunk.chunk_id: chunk for chunk in extraction.chunks}
+        for finding in public_map["findings"]:
+            assert finding["confidence"] == "partial"
+            assert len(finding["evidence"]) == 1
+            evidence = finding["evidence"][0]
+            assert evidence["excerpt"] == finding["statement"]
+            assert evidence["chunk_id"] in chunks
+            assert evidence["excerpt"] in " ".join(
+                chunks[evidence["chunk_id"]].text.split()
+            )
+
+        metadata = container.research_map_store.get_generation_metadata(
+            upload_data["paper_id"]
+        )
+        assert metadata is not None
+        assert (
+            metadata.generation_mode
+            is GenerationMode.DETERMINISTIC_EXTRACTIVE_FALLBACK
+        )
+        assert metadata.fallback_reason == "llm_provider_error"
+
+
+def test_pipeline_provider_and_fallback_failure_remains_safe(tmp_path: Path) -> None:
+    provider = FailingProvider()
+    client, container = _make_client(tmp_path, provider)
+    doc = fitz.open()
+    try:
+        page = doc.new_page()
+        page.insert_text(
+            (72, 72),
+            "This document contains background text but no eligible reported findings.",
+            fontsize=11,
+        )
+        pdf_bytes = doc.tobytes(no_new_id=True)
+    finally:
+        doc.close()
+
+    with client:
+        upload_data, job_data = _upload_and_create_job(client, pdf_bytes)
+        status = client.get(f"/api/v1/jobs/{job_data['job_id']}")
+
+        assert status.status_code == 200
+        assert status.json()["status"] == JobStatus.FAILED
+        assert status.json()["error"] == "llm_provider_error"
+        assert "raw provider outage secret detail" not in status.text
+        assert provider.call_count == 1
+        assert container.research_map_store.get(upload_data["paper_id"]) is None

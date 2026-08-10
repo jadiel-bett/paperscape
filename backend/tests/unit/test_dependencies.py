@@ -6,10 +6,12 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.database import init_db
 from app.dependencies import ServiceContainer, build_container, run_research_map_job
+from app.main import create_app
 from app.models.job import JobStatus
 from app.repositories import JobStore
 
@@ -67,6 +69,7 @@ def test_provider_construction_failure_marks_pending_job_failed(
         job_store=job_store,
         extraction_store=base.extraction_store,
         research_map_store=base.research_map_store,
+        extractive_fallback_factory=base.extractive_fallback_factory,
         paper_id_factory=base.paper_id_factory,
         job_runner_factory=factory,
     )
@@ -87,3 +90,31 @@ def test_provider_factory_is_only_background_runner_construction_site(
     assert container.job_runner_factory is not None
     assert isinstance(container.job_store, JobStore)
     assert container.job_runner_factory.__name__ == "_build_job_runner"
+
+
+def test_build_container_and_health_do_not_construct_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fallback_constructor = MagicMock(
+        side_effect=AssertionError("fallback must remain lazy")
+    )
+    provider_constructor = MagicMock(
+        side_effect=AssertionError("provider must remain lazy")
+    )
+    monkeypatch.setattr(
+        "app.dependencies.ExtractiveResearchMapService", fallback_constructor
+    )
+    monkeypatch.setattr("app.dependencies.WatsonxProvider", provider_constructor)
+    settings = _settings(tmp_path, api_key="configured", project_id="project")
+
+    container = build_container(settings)
+    app = create_app(settings, container=container)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    fallback_constructor.assert_not_called()
+    provider_constructor.assert_not_called()
+    assert container.extractive_fallback_factory is fallback_constructor

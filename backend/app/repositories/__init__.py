@@ -12,14 +12,20 @@ from app.repositories.errors import (
 )
 from app.repositories.extraction_store import ExtractionStore
 from app.repositories.job_store import JobStore
-from app.repositories.research_map_store import ResearchMapStore
+from app.repositories.research_map_store import (
+    GenerationMode,
+    ResearchMapGenerationMetadata,
+    ResearchMapStore,
+)
 
 __all__ = [
     "CorruptRecordError",
     "ExtractionStore",
+    "GenerationMode",
     "InvalidJobTransitionError",
     "JobStore",
     "PersistenceError",
     "RecordNotFoundError",
     "ResearchMapStore",
+    "ResearchMapGenerationMetadata",
 ]

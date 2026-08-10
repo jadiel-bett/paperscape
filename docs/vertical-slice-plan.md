@@ -307,10 +307,10 @@ job reaches `succeeded` status.
 
 | Setting | Env var | Default / Notes |
 |---|---|---|
-| `watsonx_api_key` | `WATSONX_API_KEY` | Required, never logged |
-| `watsonx_url` | `WATSONX_URL` | e.g. `https://us-south.ml.cloud.ibm.com` |
-| `watsonx_project_id` | `WATSONX_PROJECT_ID` | Required |
-| `granite_model_id` | `GRANITE_MODEL_ID` | Default: `ibm/granite-13b-instruct-v2` |
+| `watsonx_api_key` | `WATSONX_API_KEY` | Backend-only; optional at startup, required for generation, never logged |
+| `watsonx_url` | `WATSONX_URL` | Default: `https://us-south.ml.cloud.ibm.com`; Frankfurt uses `https://eu-de.ml.cloud.ibm.com` |
+| `watsonx_project_id` | `WATSONX_PROJECT_ID` | Backend-only; optional at startup, required for generation |
+| `granite_model_id` | `GRANITE_MODEL_ID` | Default: `ibm/granite-4-h-small` |
 | `upload_max_bytes` | `UPLOAD_MAX_BYTES` | Default: `20971520` (20 MB) |
 | `cors_origins` | `CORS_ORIGINS` | Comma-separated list |
 | `database_url` | `DATABASE_URL` | Default: `sqlite:///./paperscape.db` |
@@ -354,10 +354,17 @@ class LLMProvider(ABC):
 
 **WatsonxProvider (concrete):**
 - Constructed from a `Settings` object.
-- Calls `ibm-watsonx-ai` SDK's `ModelInference.generate()`.
-- Returns raw text string from the model response.
-- Raises `LLMProviderError` on HTTP failure, timeout, or empty response.
-- One exponential-backoff retry on transient failures.
+- Preserves the public `generate()` interface while internally calling the
+  pinned SDK's `ModelInference.chat()` with one exact user message.
+- Maps `max_tokens` to `max_completion_tokens` and passes temperature exactly.
+- Strictly validates an assistant message, content, and successful finish state
+  before returning a string.
+- Raises `LLMProviderError` on HTTP failure, timeout, or invalid Chat response.
+- Performs one application-owned retry on explicitly transient failures. The
+  pinned SDK's separate `RetryTransport` can perform up to four transport-loop
+  iterations per Chat invocation.
+- Explicitly enables TLS certificate verification and disables the pinned SDK's
+  unverified SSL fallback.
 
 **Rules:**
 - No FastAPI imports.
@@ -537,7 +544,8 @@ procedure.
 - All service-layer tests use dependency injection; no env vars or live network.
 - `JobStore` tests use `sqlite3` in-memory (`:memory:`) — no file on disk.
 - API tests use `TestClient` with FastAPI dependency overrides.
-- Live watsonx calls gated behind `WATSONX_LIVE_TEST=1`; never run in default CI.
+- Live watsonx calls require both `WATSONX_LIVE_TEST=1` and
+  `WATSONX_LIVE_ACK_CHARGES=1`; they remain skipped during ordinary pytest.
 - Background task execution in API tests is run synchronously by calling the
   task function directly after the response, not through the real async runner.
 
@@ -563,7 +571,7 @@ procedure.
 |---|---|---|
 | Docling fails to install in Docker due to native deps | Medium | `EXTRACTION_BACKEND=pymupdf` env flag bypasses Docling entirely |
 | Granite returns malformed JSON | Medium | One retry with corrective prompt fragment; `MapGenerationError` and job `failed` after two attempts |
-| watsonx credentials wrong at startup | Low | `config.py` validates required fields; app fails to start with descriptive error |
+| watsonx credentials missing or wrong when generation starts | Low | Upload remains available; job creation or lazy provider construction fails with a sanitized application error |
 | BackgroundTasks thread crash leaves job in `running` state | Low | On startup, `database.py` migration resets any `running` jobs to `failed` with error `"server_restart"` |
 | Flutter polling hammers backend | Low | 1.5 s polling interval with exponential back-off after 5 consecutive non-terminal responses |
 | Flutter web file picker platform quirks | Low | Use `file_picker` package (stable web support); tested in Chrome |
@@ -709,8 +717,9 @@ The vertical slice is complete when ALL of the following are true:
   services type-hint against the interface, not the SDK.
 - **Expected Outcomes:**
   - `LLMProvider` ABC is importable as a type.
-  - `WatsonxProvider.generate()` calls the SDK with correct params and returns
-    a string.
+  - `WatsonxProvider.generate()` calls `ModelInference.chat()` with the correct
+    message and parameters, validates the assistant response, and returns a
+    string.
   - Transient SDK failure triggers one retry; persistent failure raises
     `LLMProviderError`.
   - `test_llm_provider.py` passes with mocked `ModelInference`.

@@ -43,6 +43,14 @@ class HangingClient extends http.BaseClient {
 }
 
 void main() {
+  test('upload timeout allows slow document extraction', () {
+    final client = PaperScapeApiClient(baseUrl: 'http://host/api/v1');
+
+    expect(client.uploadTimeout,
+        greaterThanOrEqualTo(const Duration(seconds: 90)));
+    client.close();
+  });
+
   test('upload request is inspectable and exact', () async {
     final sender = CapturingSender(
       http.StreamedResponse(
@@ -74,13 +82,15 @@ void main() {
 
   test('route identifiers remain safe path segments', () async {
     final client = FakeClient(
-      body: '{"job_id":"job-1","paper_id":"paper-1","status":"pending"}',
+      body:
+          '{"job_id":"job-1","paper_id":"paper-1","status":"pending","created_at":"2026-01-01T00:00:00Z"}',
       statusCode: 202,
     );
     final api =
         PaperScapeApiClient(baseUrl: 'http://host/api/v1', client: client);
 
-    await api.createResearchMapJob('123e4567-e89b-12d3-a456-426614174000');
+    final created =
+        await api.createResearchMapJob('123e4567-e89b-12d3-a456-426614174000');
     expect(client.method, 'POST');
     expect(client.lastUri!.pathSegments, [
       'api',
@@ -91,6 +101,9 @@ void main() {
     ]);
     expect(client.lastUri!.query, isEmpty);
     expect(client.lastUri!.fragment, isEmpty);
+    expect(created.jobId, 'job-1');
+    expect(created.paperId, 'paper-1');
+    expect(created.createdAt, DateTime.utc(2026));
 
     await api.createResearchMapJob('paper id/with spaces');
     expect(client.method, 'POST');

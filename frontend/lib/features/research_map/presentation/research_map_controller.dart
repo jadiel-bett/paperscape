@@ -22,7 +22,7 @@ class ResearchMapController extends ChangeNotifier {
       AppConfig? config,
       TimerFactory? timerFactory,
       Clock? clock,
-      this.pollInterval = const Duration(milliseconds: 1500),
+      this.pollInterval = const Duration(seconds: 2),
       this.pollTimeout = const Duration(minutes: 2)})
       : _api = api,
         _picker = picker,
@@ -39,10 +39,12 @@ class ResearchMapController extends ChangeNotifier {
   ResearchMapState state = const ResearchMapState();
   Timer? _timer;
   DateTime? _pollStarted;
-  bool _polling = false;
+  int? _pollingGeneration;
   bool _disposed = false;
   int _nextGeneration() {
     _timer?.cancel();
+    _timer = null;
+    _pollingGeneration = null;
     return state.generation + 1;
   }
 
@@ -91,14 +93,24 @@ class ResearchMapController extends ChangeNotifier {
         state.selectedPdf == null ||
         state.validationError != null) return;
     final g = state.generation;
+    if (state.uploadedPaperId != null) {
+      await _createJob(g);
+      return;
+    }
     try {
       _set(state.copyWith(
           phase: WorkflowPhase.uploading,
           isBusy: true,
           clearError: true,
-          clearMap: true));
+          clearMap: true,
+          clearJob: true));
       final up = await _api.uploadPaper(state.selectedPdf!);
       if (_stale(g)) return;
+      if (up.paperId.trim().isEmpty) {
+        throw const ApiException(
+            code: 'invalid_identifier',
+            safeMessage: 'The uploaded paper identifier is invalid.');
+      }
       _set(state.copyWith(
           phase: WorkflowPhase.uploadSucceeded, upload: up, isBusy: false));
       await _createJob(g);
@@ -116,17 +128,36 @@ class ResearchMapController extends ChangeNotifier {
   }
 
   Future<void> _createJob(int g) async {
-    if (state.upload == null) return;
+    final paperId = state.uploadedPaperId;
+    if (paperId == null) {
+      if (!_stale(g)) {
+        _set(state.copyWith(
+            phase: WorkflowPhase.failed,
+            errorMessage: safeMessageForCode('invalid_identifier'),
+            retryAction: RetryAction.upload,
+            isBusy: false,
+            clearJob: true));
+      }
+      return;
+    }
     try {
+      _timer?.cancel();
+      _timer = null;
+      _pollStarted = null;
       _set(state.copyWith(
-          phase: WorkflowPhase.creatingJob, isBusy: true, clearError: true));
-      final job = await _api.createResearchMapJob(state.upload!.paperId);
+          phase: WorkflowPhase.creatingJob,
+          isBusy: true,
+          clearError: true,
+          clearMap: true,
+          clearJob: true));
+      final job = await _api.createResearchMapJob(paperId);
       if (_stale(g)) return;
+      if (job.paperId.trim() != paperId) throw const ParseException();
       _set(state.copyWith(
           phase: WorkflowPhase.polling,
           jobId: job.jobId,
           jobStatus: job.status,
-          isBusy: false));
+          isBusy: true));
       _pollStarted = _clock();
       await _pollNow(g);
     } catch (e) {
@@ -143,20 +174,32 @@ class ResearchMapController extends ChangeNotifier {
   }
 
   Future<void> _pollNow(int g) async {
-    if (_polling || state.jobId == null || _stale(g)) return;
+    final jobId = state.jobId?.trim();
+    if (_pollingGeneration == g || _stale(g)) return;
+    if (jobId == null || jobId.isEmpty) {
+      _set(state.copyWith(
+          phase: WorkflowPhase.failed,
+          errorMessage: safeMessageForCode('invalid_identifier'),
+          retryAction: RetryAction.createJob,
+          isBusy: false,
+          clearJob: true));
+      return;
+    }
     if (_pollStarted != null &&
         _clock().difference(_pollStarted!) >= pollTimeout) {
       _set(state.copyWith(
           phase: WorkflowPhase.failed,
           errorMessage: pollTimeoutMessage,
-          retryAction: RetryAction.pollJob));
+          retryAction: RetryAction.createJob,
+          isBusy: false));
       return;
     }
-    _polling = true;
+    _pollingGeneration = g;
     try {
-      final js = await _api.getJobStatus(state.jobId!);
+      final js = await _api.getJobStatus(jobId);
       if (_stale(g)) return;
-      _set(state.copyWith(phase: WorkflowPhase.polling, jobStatus: js.status));
+      _set(state.copyWith(
+          phase: WorkflowPhase.polling, jobStatus: js.status, isBusy: true));
       if (js.status == JobStatus.pending || js.status == JobStatus.running) {
         _timer = _timerFactory(pollInterval, () => _pollNow(g));
       } else if (js.status == JobStatus.succeeded) {
@@ -165,29 +208,44 @@ class ResearchMapController extends ChangeNotifier {
         _set(state.copyWith(
             phase: WorkflowPhase.failed,
             errorMessage: safeMessageForCode(js.error),
-            retryAction: RetryAction.createJob));
+            retryAction: RetryAction.createJob,
+            isBusy: false));
       }
     } on ApiException catch (e) {
       if (!_stale(g)) {
         _set(state.copyWith(
             phase: WorkflowPhase.failed,
             errorMessage: safeMessageForCode(e.code),
-            retryAction: RetryAction.pollJob));
+            retryAction: RetryAction.createJob,
+            isBusy: false));
       }
     } finally {
-      _polling = false;
+      if (_pollingGeneration == g) _pollingGeneration = null;
     }
   }
 
   Future<void> _loadMap(int g) async {
-    if (state.upload == null) return;
+    final paperId = state.uploadedPaperId;
+    if (paperId == null) {
+      if (!_stale(g)) {
+        _set(state.copyWith(
+            phase: WorkflowPhase.failed,
+            errorMessage: safeMessageForCode('invalid_identifier'),
+            retryAction: RetryAction.upload,
+            isBusy: false));
+      }
+      return;
+    }
     try {
       _timer?.cancel();
       _set(state.copyWith(phase: WorkflowPhase.loadingMap, isBusy: true));
-      final map = await _api.getResearchMap(state.upload!.paperId);
+      final map = await _api.getResearchMap(paperId);
       if (!_stale(g)) {
         _set(state.copyWith(
-            phase: WorkflowPhase.ready, map: map, isBusy: false));
+            phase: WorkflowPhase.ready,
+            map: map,
+            isBusy: false,
+            clearError: true));
       }
     } catch (e) {
       if (!_stale(g)) {
@@ -196,31 +254,24 @@ class ResearchMapController extends ChangeNotifier {
             errorMessage: e is ApiException
                 ? safeMessageForCode(e.code)
                 : safeMessageForCode(null),
-            retryAction: RetryAction.loadMap,
+            retryAction: RetryAction.createJob,
             isBusy: false));
       }
     }
   }
 
   Future<void> retry() {
-    switch (state.retryAction) {
-      case RetryAction.upload:
-        return start();
-      case RetryAction.createJob:
-        return _createJob(state.generation);
-      case RetryAction.pollJob:
-        _pollStarted = _clock();
-        return _pollNow(state.generation);
-      case RetryAction.loadMap:
-        return _loadMap(state.generation);
-      case RetryAction.none:
-        return Future<void>.value();
+    if (state.uploadedPaperId != null) {
+      return _createJob(state.generation);
     }
+    if (state.retryAction == RetryAction.upload) return start();
+    return Future<void>.value();
   }
 
   void reset() {
     final g = _nextGeneration();
     _pollStarted = null;
+    _pollingGeneration = null;
     _set(ResearchMapState(generation: g));
   }
 
@@ -229,6 +280,7 @@ class ResearchMapController extends ChangeNotifier {
     _disposed = true;
     _timer?.cancel();
     _pollStarted = null;
+    _pollingGeneration = null;
     super.dispose();
   }
 }
