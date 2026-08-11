@@ -107,6 +107,20 @@ def init_db(
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS creator_packs (
+                pack_id  TEXT NOT NULL PRIMARY KEY,
+                paper_id TEXT NOT NULL,
+                audience TEXT NOT NULL,
+                status   TEXT NOT NULL CHECK (status IN ('draft', 'approved')),
+                pack_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_creator_packs_paper_id ON creator_packs (paper_id)"
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS research_map_metadata (
                 paper_id        TEXT NOT NULL PRIMARY KEY,
                 generation_mode TEXT NOT NULL

@@ -14,6 +14,7 @@ from app.dependencies import (
     build_container,
 )
 from app.routers import health_router, jobs_router, papers_router
+from app.routers.creator_packs import router as creator_packs_router
 
 
 def create_app(
@@ -62,6 +63,7 @@ def create_app(
 
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(papers_router, prefix="/api/v1")
+    application.include_router(creator_packs_router, prefix="/api/v1")
     application.include_router(jobs_router, prefix="/api/v1")
 
     return application

@@ -35,6 +35,17 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Callable
 
+from app.models.provider import (
+    GenerationProvenance,
+    GenerationResult,
+    ModelCapability,
+    ModelDescriptor,
+    ProviderType,
+    StructuredGenerationRequest,
+    TextGenerationRequest,
+)
+from app.services.provider_ports import ProviderAdapter
+
 if TYPE_CHECKING:
     from app.config import Settings
 
@@ -171,7 +182,7 @@ class _SdkClientFactory:
 # ---------------------------------------------------------------------------
 
 
-class WatsonxProvider(LLMProvider):
+class WatsonxProvider(LLMProvider, ProviderAdapter):
     """Concrete ``LLMProvider`` backed by IBM watsonx.ai.
 
     Construction
@@ -213,6 +224,7 @@ class WatsonxProvider(LLMProvider):
             credentials=credentials,
             project_id=settings.watsonx_project_id,
         )
+        self._model_id = settings.granite_model_id
 
     # ------------------------------------------------------------------
     # Public interface
@@ -260,6 +272,45 @@ class WatsonxProvider(LLMProvider):
             raise TransientLLMError(
                 f"Transient failure persisted after retry: {type(exc).__name__}"
             ) from exc
+
+    @property
+    def provider_type(self) -> ProviderType:
+        return ProviderType.WATSONX
+
+    @property
+    def model_descriptor(self) -> ModelDescriptor:
+        return ModelDescriptor(
+            provider_type=ProviderType.WATSONX,
+            model_id=self._model_id,
+            display_name=self._model_id,
+            capabilities={ModelCapability.TEXT_GENERATION, ModelCapability.STRUCTURED_OUTPUT},
+        )
+
+    def generate_text(self, request: TextGenerationRequest) -> GenerationResult:
+        started = time.perf_counter()
+        content = self.generate(
+            request.prompt,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+        )
+        return GenerationResult(
+            content=content,
+            provenance=GenerationProvenance(
+                provider_type=ProviderType.WATSONX,
+                model_id=self._model_id,
+                adapter_version="watsonx-1.5.14",
+                latency_ms=round((time.perf_counter() - started) * 1000),
+            ),
+        )
+
+    def generate_structured(self, request: StructuredGenerationRequest) -> GenerationResult:
+        return self.generate_text(
+            TextGenerationRequest(
+                prompt=request.prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Private helpers

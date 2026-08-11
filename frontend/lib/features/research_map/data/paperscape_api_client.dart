@@ -9,12 +9,19 @@ import 'api_exception.dart';
 import 'dto/job_response.dart';
 import 'dto/research_map.dart';
 import 'dto/upload_response.dart';
+import 'dto/creator_pack.dart';
 
 abstract interface class PaperScapeApi {
   Future<UploadResponse> uploadPaper(SelectedPdf pdf);
   Future<JobCreateResponse> createResearchMapJob(String paperId);
   Future<JobStatusResponse> getJobStatus(String jobId);
   Future<ResearchMap> getResearchMap(String paperId);
+}
+
+abstract interface class CreatorPackApi {
+  Future<CreatorPack> createCreatorPack(String paperId, CreatorAudience audience);
+  Future<CreatorPack> approveCreatorPack(String paperId, String packId);
+  Future<String> exportCreatorPack(String paperId, String packId);
 }
 
 typedef MultipartFactory = http.MultipartRequest Function(
@@ -32,7 +39,7 @@ class HttpMultipartSender implements MultipartSender {
       _client.send(request);
 }
 
-class PaperScapeApiClient implements PaperScapeApi {
+class PaperScapeApiClient implements PaperScapeApi, CreatorPackApi {
   PaperScapeApiClient({
     required String baseUrl,
     http.Client? client,
@@ -116,6 +123,58 @@ class PaperScapeApiClient implements PaperScapeApi {
         200,
         ResearchMap.fromJson,
       );
+
+  @override
+  Future<CreatorPack> createCreatorPack(
+          String paperId, CreatorAudience audience) =>
+      _postJson(
+        _uri(['papers', paperId, 'creator-packs']),
+        {'audience': audienceValue(audience)},
+        201,
+        CreatorPack.fromJson,
+      );
+
+  @override
+  Future<CreatorPack> approveCreatorPack(String paperId, String packId) =>
+      _postJson(
+        _uri(['papers', paperId, 'creator-packs', packId, 'approve']),
+        {'approved': true},
+        200,
+        CreatorPack.fromJson,
+      );
+
+  @override
+  Future<String> exportCreatorPack(String paperId, String packId) async {
+    try {
+      final response = await _client
+          .get(_uri(['papers', paperId, 'creator-packs', packId, 'export']))
+          .timeout(timeout);
+      if (response.statusCode != 200) throw parseApiError(response.statusCode, response.body);
+      return response.body;
+    } on TimeoutException {
+      throw const ApiException(code: 'timeout', safeMessage: 'Something went wrong. Please try again.');
+    } on ApiException {
+      rethrow;
+    } catch (_) {
+      throw const ApiException(code: 'network_error', safeMessage: 'Something went wrong. Please try again.');
+    }
+  }
+
+  Future<T> _postJson<T>(Uri uri, Map<String, Object?> body, int ok,
+      T Function(Map<String, Object?>) fromJson) async {
+    try {
+      final response = await _client
+          .post(uri, headers: {'content-type': 'application/json'}, body: jsonEncode(body))
+          .timeout(timeout);
+      return _decode(response, ok, fromJson);
+    } on TimeoutException {
+      throw const ApiException(code: 'timeout', safeMessage: 'Something went wrong. Please try again.');
+    } on ApiException {
+      rethrow;
+    } catch (_) {
+      throw const ApiException(code: 'network_error', safeMessage: 'Something went wrong. Please try again.');
+    }
+  }
 
   Future<T> _getOrPost<T>(String method, Uri uri, int ok,
       T Function(Map<String, Object?>) fromJson) async {

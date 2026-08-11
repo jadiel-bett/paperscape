@@ -28,8 +28,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.paper import Chunk, ExtractionResult
+from app.models.provider import StructuredGenerationRequest
 from app.models.research_map import Evidence, Finding, ResearchMap
 from app.services.llm_provider import LLMProvider, LLMProviderError
+from app.services.provider_ports import ProviderAdapter
 
 _log = logging.getLogger(__name__)
 
@@ -605,7 +607,7 @@ class ResearchMapService:
 
     def __init__(
         self,
-        provider: LLMProvider,
+        provider: LLMProvider | ProviderAdapter,
         *,
         prompt_template: str | None = None,
         max_context_words: int = 6000,
@@ -626,6 +628,24 @@ class ResearchMapService:
                 f"Prompt template must contain exactly one {_CONTEXT_SENTINEL!r} sentinel. "
                 f"Found {self._raw_template.count(_CONTEXT_SENTINEL)}."
             )
+
+    def _generate_structured(self, prompt: str) -> str:
+        """Use the capability port when available, retaining fake compatibility."""
+        generate_structured = getattr(self._provider, "generate_structured", None)
+        if callable(generate_structured):
+            result = generate_structured(
+                StructuredGenerationRequest(
+                    prompt=prompt,
+                    max_tokens=_MAP_MAX_TOKENS,
+                    temperature=_MAP_TEMPERATURE,
+                )
+            )
+            return result.content
+        return self._provider.generate(
+            prompt,
+            max_tokens=_MAP_MAX_TOKENS,
+            temperature=_MAP_TEMPERATURE,
+        )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -654,11 +674,7 @@ class ResearchMapService:
         # Step 3 — first generation attempt.
         issue_codes: set[str] = set()
         try:
-            response = self._provider.generate(
-                base_prompt,
-                max_tokens=_MAP_MAX_TOKENS,
-                temperature=_MAP_TEMPERATURE,
-            )
+            response = self._generate_structured(base_prompt)
             parsed, issues = self._parse_and_validate(response, evidence_catalogue)
             if not issues:
                 return self._to_public_map(
@@ -687,11 +703,7 @@ class ResearchMapService:
             base_prompt, issue_codes, evidence_catalogue
         )
         try:
-            response = self._provider.generate(
-                corrective_prompt,
-                max_tokens=_MAP_MAX_TOKENS,
-                temperature=_MAP_TEMPERATURE,
-            )
+            response = self._generate_structured(corrective_prompt)
             parsed, remaining_issues = self._parse_and_validate(
                 response, evidence_catalogue
             )

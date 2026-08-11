@@ -83,6 +83,12 @@ String safeMessageForCode(String? code) {
       return 'The extracted paper content is missing. Start over and upload again.';
     case 'map_generation_failed':
       return 'PaperScape could not generate a grounded research map for this paper.';
+    case 'pack_not_found':
+      return 'This creator pack could not be found.';
+    case 'pack_not_approved':
+      return 'Review and approve the creator pack before exporting it.';
+    case 'pack_locked':
+      return 'Approved creator packs are locked. Create a new draft to edit it.';
     case 'llm_provider_error':
       return 'The model service was unavailable. Please try again later.';
     case 'invalid_identifier':

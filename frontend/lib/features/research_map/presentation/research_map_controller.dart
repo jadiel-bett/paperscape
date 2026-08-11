@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../../../app/app_config.dart';
 import '../data/api_exception.dart';
 import '../data/dto/job_response.dart';
+import '../data/dto/creator_pack.dart';
 import '../data/paperscape_api_client.dart';
 import '../domain/pdf_picker.dart';
 import '../domain/selected_pdf.dart';
@@ -257,6 +258,49 @@ class ResearchMapController extends ChangeNotifier {
             retryAction: RetryAction.createJob,
             isBusy: false));
       }
+    }
+  }
+
+  Future<void> createCreatorPack(CreatorAudience audience) async {
+    final paperId = state.uploadedPaperId;
+    if (paperId == null || state.map == null || state.isBusy) return;
+    try {
+      _set(state.copyWith(isBusy: true, clearError: true));
+      final pack = await (_api as CreatorPackApi).createCreatorPack(paperId, audience);
+      _set(state.copyWith(creatorPack: pack, isBusy: false));
+    } catch (e) {
+      _set(state.copyWith(
+        isBusy: false,
+        errorMessage: e is ApiException ? safeMessageForCode(e.code) : safeMessageForCode(null),
+      ));
+    }
+  }
+
+  Future<void> approveCreatorPack() async {
+    final paperId = state.uploadedPaperId;
+    final pack = state.creatorPack;
+    if (paperId == null || pack == null || state.isBusy) return;
+    try {
+      _set(state.copyWith(isBusy: true, clearError: true));
+      final approved = await (_api as CreatorPackApi).approveCreatorPack(paperId, pack.packId);
+      _set(state.copyWith(creatorPack: approved, isBusy: false));
+    } catch (e) {
+      _set(state.copyWith(
+        isBusy: false,
+        errorMessage: e is ApiException ? safeMessageForCode(e.code) : safeMessageForCode(null),
+      ));
+    }
+  }
+
+  Future<String?> exportCreatorPack() async {
+    final paperId = state.uploadedPaperId;
+    final pack = state.creatorPack;
+    if (paperId == null || pack == null || pack.status != 'approved') return null;
+    try {
+      return await (_api as CreatorPackApi).exportCreatorPack(paperId, pack.packId);
+    } catch (e) {
+      _set(state.copyWith(errorMessage: e is ApiException ? safeMessageForCode(e.code) : safeMessageForCode(null)));
+      return null;
     }
   }
 

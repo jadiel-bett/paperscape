@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     watsonx_project_id: str = ""
     granite_model_id: str = "ibm/granite-4-h-small"
 
+    # Provider-neutral launch routes. OpenAI-compatible credentials are used
+    # only by the backend and are never serialized to the Flutter client.
+    openai_api_key: SecretStr = SecretStr("")
+    openai_model_id: str = "gpt-4o-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
+    compatible_api_key: SecretStr = SecretStr("")
+    compatible_model_id: str = ""
+    compatible_base_url: str = ""
+    default_provider: str = "managed"
+    provider_timeout_seconds: float = 60.0
+
     # Upload
     upload_max_bytes: int = 20_971_520  # 20 MB
 

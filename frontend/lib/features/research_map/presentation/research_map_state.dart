@@ -1,5 +1,6 @@
 import '../data/dto/job_response.dart';
 import '../data/dto/research_map.dart';
+import '../data/dto/creator_pack.dart';
 import '../data/dto/upload_response.dart';
 import '../domain/selected_pdf.dart';
 
@@ -28,6 +29,7 @@ class ResearchMapState {
     this.jobId,
     this.jobStatus,
     this.map,
+    this.creatorPack,
     this.errorMessage,
     this.retryAction = RetryAction.none,
     this.isBusy = false,
@@ -41,6 +43,7 @@ class ResearchMapState {
   final String? jobId;
   final JobStatus? jobStatus;
   final ResearchMap? map;
+  final CreatorPack? creatorPack;
   final String? errorMessage;
   final RetryAction retryAction;
   final bool isBusy;
@@ -60,6 +63,7 @@ class ResearchMapState {
           String? jobId,
           JobStatus? jobStatus,
           ResearchMap? map,
+          CreatorPack? creatorPack,
           String? errorMessage,
           RetryAction? retryAction,
           bool? isBusy,
@@ -80,6 +84,7 @@ class ResearchMapState {
         jobId: clearJob ? null : jobId ?? this.jobId,
         jobStatus: clearJob ? null : jobStatus ?? this.jobStatus,
         map: clearMap ? null : map ?? this.map,
+        creatorPack: clearMap ? null : creatorPack ?? this.creatorPack,
         errorMessage: clearError ? null : errorMessage ?? this.errorMessage,
         retryAction: retryAction ?? this.retryAction,
         isBusy: isBusy ?? this.isBusy,

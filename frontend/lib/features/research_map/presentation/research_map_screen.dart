@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../app/app_theme.dart';
 import '../data/dto/research_map.dart';
+import '../data/dto/creator_pack.dart';
 import '../domain/selected_pdf.dart';
 import 'research_map_controller.dart';
 import 'research_map_state.dart';
@@ -90,6 +91,24 @@ class _ResearchMapScreenState extends State<ResearchMapScreen> {
                               state.map != null) ...[
                             const SizedBox(height: 30),
                             _MapView(map: state.map!),
+                            const SizedBox(height: 18),
+                            _CreatorPackPanel(
+                              state: state,
+                              onGenerate: widget.controller.createCreatorPack,
+                              onApprove: widget.controller.approveCreatorPack,
+                              onExport: () async {
+                                final markdown = await widget.controller.exportCreatorPack();
+                                if (!context.mounted || markdown == null) return;
+                                await showDialog<void>(
+                                  context: context,
+                                  builder: (_) => AlertDialog(
+                                    title: const Text('Approved creator pack'),
+                                    content: SingleChildScrollView(child: SelectableText(markdown)),
+                                    actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
+                                  ),
+                                );
+                              },
+                            ),
                           ],
                         ],
                       ),
@@ -110,6 +129,68 @@ class _ResearchMapScreenState extends State<ResearchMapScreen> {
         WorkflowPhase.polling,
         WorkflowPhase.loadingMap,
       }.contains(phase);
+}
+
+class _CreatorPackPanel extends StatefulWidget {
+  const _CreatorPackPanel({required this.state, required this.onGenerate, required this.onApprove, required this.onExport});
+  final ResearchMapState state;
+  final Future<void> Function(CreatorAudience audience) onGenerate;
+  final Future<void> Function() onApprove;
+  final Future<void> Function() onExport;
+
+  @override
+  State<_CreatorPackPanel> createState() => _CreatorPackPanelState();
+}
+
+class _CreatorPackPanelState extends State<_CreatorPackPanel> {
+  CreatorAudience _audience = CreatorAudience.generalPublic;
+
+  String _label(CreatorAudience value) => switch (value) {
+        CreatorAudience.generalPublic => 'General public',
+        CreatorAudience.highSchool => 'High-school learner',
+        CreatorAudience.undergraduate => 'Undergraduate student',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final pack = widget.state.creatorPack;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(22),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('02 / CREATE A COMMUNICATION PACK', style: Theme.of(context).textTheme.labelMedium?.copyWith(color: paperScapeViolet, letterSpacing: 1.2)),
+          const SizedBox(height: 8),
+          Text('Translate the approved map for an audience', style: Theme.of(context).textTheme.headlineSmall),
+          const SizedBox(height: 6),
+          Text('The pack is derived from the verified findings and keeps its evidence trail.', style: Theme.of(context).textTheme.bodyMedium),
+          const SizedBox(height: 14),
+          Row(children: [
+            DropdownButton<CreatorAudience>(value: _audience, items: CreatorAudience.values.map((item) => DropdownMenuItem(value: item, child: Text(_label(item)))).toList(), onChanged: widget.state.isBusy ? null : (value) => setState(() => _audience = value ?? _audience)),
+            const SizedBox(width: 12),
+            FilledButton.icon(onPressed: widget.state.isBusy ? null : () => widget.onGenerate(_audience), icon: const Icon(Icons.auto_awesome), label: const Text('Generate draft')),
+          ]),
+          if (pack != null) ...[
+            const Divider(height: 28),
+            Text(pack.title, style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            SelectableText(pack.summary),
+            const SizedBox(height: 14),
+            Text('Evidence cards', style: Theme.of(context).textTheme.titleMedium),
+            ...pack.evidenceCards.map((card) => ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.link, color: paperScapeBlue), title: Text(card.statement), subtitle: Text('${card.confidence} support  •  ${card.evidenceIds.length} source span(s)'))),
+            Text('Limitations', style: Theme.of(context).textTheme.titleMedium),
+            ...pack.limitations.map((item) => Text('• $item')),
+            const SizedBox(height: 12),
+            Row(children: [
+              if (pack.status != 'approved') FilledButton(onPressed: widget.state.isBusy ? null : widget.onApprove, child: const Text('Approve pack')),
+              if (pack.status == 'approved') FilledButton.icon(onPressed: widget.state.isBusy ? null : widget.onExport, icon: const Icon(Icons.download), label: const Text('View export')),
+              const SizedBox(width: 12),
+              Text(pack.status == 'approved' ? 'Approved for export' : 'Draft — review before export', style: Theme.of(context).textTheme.labelMedium),
+            ]),
+          ],
+        ]),
+      ),
+    );
+  }
 }
 
 class _AtlasHeader extends StatelessWidget {

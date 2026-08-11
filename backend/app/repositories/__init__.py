@@ -11,6 +11,7 @@ from app.repositories.errors import (
     RecordNotFoundError,
 )
 from app.repositories.extraction_store import ExtractionStore
+from app.repositories.creator_pack_store import CreatorPackStore
 from app.repositories.job_store import JobStore
 from app.repositories.research_map_store import (
     GenerationMode,
@@ -20,6 +21,7 @@ from app.repositories.research_map_store import (
 
 __all__ = [
     "CorruptRecordError",
+    "CreatorPackStore",
     "ExtractionStore",
     "GenerationMode",
     "InvalidJobTransitionError",
